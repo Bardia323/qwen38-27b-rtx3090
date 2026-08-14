@@ -1,0 +1,6 @@
+venv/
+models/
+api_key.txt
+qwen.log
+profiles/
+__pycache__/
