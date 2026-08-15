@@ -3,14 +3,26 @@
 For serving many concurrent requests: API backends, data processing pipelines,
 eval runs. Tuned for aggregate tokens per second, not per-request latency.
 
-Measured on an RTX 3090 (256 in / 256 out, 64 concurrent):
+## Benchmarks
 
-- 416 tok/s sustained aggregate, 672 tok/s peak
-- 66 ms median time per output token
-- ~1000 tok/s total (prompt + completion) on input-heavy workloads
+`vllm bench serve`, random dataset, RTX 3090 at 250 W:
 
-The tradeoff: a single request on an idle server decodes at ~17 tok/s. If
-that's your main use case, use [single-user mode](../single-user/) instead.
+| workload | output tok/s | total tok/s (in+out) | median TPOT | median TTFT |
+|---|---|---|---|---|
+| 256/256, 1 concurrent | 45.0 | 90 | 21.4 ms | 229 ms |
+| 256/256, 8 concurrent | 249.7 | 499 | 25.4 ms | — |
+| 256/256, 64 concurrent | 417.5 | 835 | 65.4 ms | 22.3 s* |
+| 2048/256, 32 concurrent | 115.0 | 1034.6 | 203.7 ms | 15.6 s* |
+| 8192/512, 16 concurrent | 59.1 | 1004.3 | 209.1 ms | 24.8 s* |
+
+*TTFT at saturation is queue time — the bench fires all requests at once.
+Under real traffic at lower utilization it's sub-second.
+
+Two readings from the table: long-input workloads are prefill-bound (the
+machine sustains ~1000 total tok/s of prompt processing no matter the shape),
+and single-stream on an idle server is a respectable 45 tok/s even without
+speculation. If sub-20 ms tokens for one user is the goal, use
+[single-user mode](../single-user/) instead.
 
 ## Setup
 

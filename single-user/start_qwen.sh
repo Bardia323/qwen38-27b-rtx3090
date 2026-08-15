@@ -3,14 +3,15 @@
 #
 # Same base config as batch mode, plus MTP speculative decoding: the checkpoint
 # keeps Qwen's multi-token-prediction head, so the model drafts 2 tokens ahead
-# and verifies them in one pass. Per-token latency drops from ~60 ms to ~25 ms
-# (roughly 40 tok/s at your prompt). The price is aggregate throughput under
-# load (~145 tok/s at high concurrency vs 416 without MTP), which is why this
-# is a separate mode and not the default.
+# and verifies them in one pass. Measured: 63 tok/s single-stream (14.9 ms per
+# token) vs 45 tok/s without speculation, at 57% draft acceptance. The price is
+# throughput under load, which is why this is a separate mode and not the
+# default: from ~8 concurrent users, batch mode wins.
 #
 # max-num-seqs is 8 here: fewer state slots to reserve, and past a handful of
-# concurrent users you should be running batch mode anyway. Try
-# num_speculative_tokens 3 if your prompts are code-heavy (higher acceptance).
+# concurrent users you should be running batch mode anyway. DRAFT_TOKENS=3
+# measured slightly worse on general text (46% acceptance); might still pay
+# off on repetitive/code-heavy prompts.
 
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"

@@ -7,14 +7,32 @@ API with key auth, and two ready-made configs depending on what you're doing:
 | | [batch/](batch/) | [single-user/](single-user/) |
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
-| aggregate throughput | **416 tok/s** (672 peak) @ 64 concurrent | ~145 tok/s |
-| single-stream speed | ~17 tok/s | **~40 tok/s** (25 ms/token) |
+| aggregate, 64 concurrent | **417 tok/s** (672 peak) | n/a (8 slots) |
+| aggregate, 8 concurrent | **250 tok/s** | 241 tok/s |
+| single-stream speed | 45 tok/s (21.4 ms/token) | **63 tok/s** (14.9 ms/token) |
 | trick | big batches, no speculation | MTP speculative decoding |
 
 Both share the same install; the mode is just which launch script you run.
-For reference, [ninfer-3090](https://github.com/Don-Chad/ninfer-3090)
-publishes 161 tok/s at 8 concurrent for this model on the same card. Our 3090
-also runs at a 250 W power limit, so these numbers are probably conservative.
+The crossover is around 4-8 concurrent users: above that, plain batching beats
+speculation and you should be in batch mode.
+
+All numbers: `vllm bench serve`, 256 in / 256 out, RTX 3090 at a 250 W power
+limit (stock is 350 W, so these are probably conservative).
+
+### vs. ninfer-3090
+
+[ninfer-3090](https://github.com/Don-Chad/ninfer-3090) publishes these numbers
+for the same model on the same card; measured ours side by side:
+
+| | ninfer-3090 (MTP3) | this repo | |
+|---|---|---|---|
+| 1 concurrent, decode rate | 70.2 tok/s | 67 tok/s (14.9 ms TPOT) | -5% |
+| 8 concurrent, aggregate | 161.3 tok/s | 249.7 tok/s | **+55%** |
+| 64 concurrent, aggregate | not supported (C8 max) | 417.5 tok/s | |
+| max context | 262k claimed for other models, 16k in their Qwen3.8 examples | 150k | |
+
+Their single-user number is ~5% ahead on a power-capped card; everything at
+concurrency 2+ is a clear win for vLLM's continuous batching.
 
 ## Why this isn't just `vllm serve`
 
@@ -35,6 +53,24 @@ Three things in this repo that stock vLLM doesn't give you:
    upgrades.
 3. **Tuned flags that are easy to get wrong**, each documented in the launch
    scripts and the gotchas below.
+
+### What each quantization step buys
+
+Measured cumulatively on the 3090, 256 in / 256 out at 64 concurrent. On this
+architecture spare VRAM converts directly into batch capacity (see gotcha 4),
+which is why the weight savings show up as throughput:
+
+| step | what it does | weights in VRAM | cache pool | aggregate |
+|---|---|---|---|---|
+| W4A16 AutoRound body (as published) | all linears on int4 Marlin kernels | 16.84 GB | 66.7k tokens | 370 tok/s (8k ctx) |
+| + fp8 KV cache | halves KV bytes per token | 16.84 GB | 155.2k tokens | 354 tok/s, but 131k+ context becomes possible at all |
+| + lm_head int8 (`quant_lm_head.py`) | logits matmul moves to int8 Marlin, 2.5 GB bf16 freed | 15.43 GB | 192.4k tokens | 398 tok/s |
+| + embed_tokens int8 (`quant_embed.py` + patch) | embedding gather dequantizes on the fly | 14.26 GB | 200.0k tokens | 417 tok/s |
+
+Quality checked after each step: ~0.6% round-trip error per matrix, no change
+we could detect in Danish/English QA, arithmetic, or 20k-token needle
+retrieval. Going below int8 on lm_head/embeddings is where we'd start to
+worry; int4 there saves another ~1.3 GB if you want to gamble.
 
 ## Setup
 

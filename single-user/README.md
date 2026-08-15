@@ -7,15 +7,32 @@ The difference from batch mode is MTP speculative decoding. Qwen ships a
 multi-token-prediction head with the model and this checkpoint keeps it, so
 the model drafts ahead and verifies the draft in a single forward pass.
 
-Measured on an RTX 3090:
+## Benchmarks
 
-- ~25 ms per token (~40 tok/s) streaming to one user, vs ~60 ms in batch mode
-- same 150k context, same quality (speculative decoding is exact — the output
-  distribution is identical to normal decoding)
+`vllm bench serve`, 256 in / 256 out, RTX 3090 at 250 W. We tested vLLM's
+built-in MTP at two draft depths, plus the community
+[DSpark](https://huggingface.co/RadixArk/Qwen3.8-27B-DSpark) draft model for
+this exact target:
 
-Don't put this config behind a busy API: at high concurrency the drafting
-overhead wins and aggregate throughput drops to ~145 tok/s, roughly a third of
-batch mode.
+| config | 1 concurrent | median TPOT | 8 concurrent | draft acceptance | extra VRAM |
+|---|---|---|---|---|---|
+| no speculation (batch mode) | 45.0 tok/s | 21.4 ms | 249.7 tok/s | — | — |
+| **MTP, 2 drafts (this mode)** | **63.2 tok/s** | **14.9 ms** | 240.6 tok/s | 57% | none |
+| MTP, 3 drafts | 56.1 tok/s | 14.0 ms | 242.0 tok/s | 46% | none |
+| DSpark, 7 drafts | 61.3 tok/s | 17.9 ms | 108.6 tok/s | 16% | 2.7 GB, ctx capped ~62k |
+| DSpark, 3 drafts | 56.5 tok/s | 16.6 ms | 177.6 tok/s | 30% | 2.7 GB, ctx capped ~62k |
+
+MTP-2 wins: +40% single-stream over no speculation, full 150k context kept,
+zero extra memory, and speculative decoding is exact (the output distribution
+is identical to normal decoding). The DSpark draft head sounds appealing on
+paper (block-7 drafts) but its acceptance collapses against this int4 target
+and it burns 2.7 GB that this architecture would rather spend on cache pages.
+To try it anyway: point `--speculative-config` at the DSpark model with
+`{"method":"dspark",...}` and set the arch in its config.json to
+`Qwen3DSparkModel` so vLLM dispatches the right implementation.
+
+Don't put this mode behind a busy API: the no-speculation column wins from
+roughly 8 concurrent users up, and batch mode scales to 64.
 
 ## Setup
 
@@ -44,7 +61,7 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 
 | var | default | notes |
 |---|---|---|
-| `DRAFT_TOKENS` | 2 | speculative depth. Try 3 for code-heavy use — acceptance is higher there, so deeper drafts pay off. Beyond 3 hasn't helped us |
+| `DRAFT_TOKENS` | 2 | speculative depth. 3 measured slightly worse on general text (see table); might pay off on repetitive/code-heavy prompts |
 | `MAX_SEQS` | 8 | plenty for a few users; keeps state-slot reservations small |
 | `MAX_LEN` | 150000 | |
 | `PORT` | 18020 | |
