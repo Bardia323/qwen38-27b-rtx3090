@@ -9,8 +9,36 @@ the model drafts ahead and verifies the draft in a single forward pass.
 
 ## Benchmarks
 
-`vllm bench serve`, 256 in / 256 out, RTX 3090 at 250 W. We tested vLLM's
-built-in MTP at two draft depths, plus the community
+Cohort protocol (same as ninfer-3090's published tables): C concurrent
+requests, 256-token prompts, 1,024 output tokens each. `vllm bench serve`,
+RTX 3090 at 250 W:
+
+| Cohort | Total output | End-to-end throughput | Decode throughput* | MTP acceptance | Mean TTFT | Peak VRAM |
+|---|---|---|---|---|---|---|
+| C1 | 1,024 tokens | 81.85 tok/s | 83.47 tok/s | 81.8% | 260 ms | 23,035 MiB |
+| C2 | 2,048 tokens | 119.38 tok/s | 136.99 tok/s | 59.6% | 657 ms | 23,035 MiB |
+| C4 | 4,096 tokens | 243.62 tok/s | 281.69 tok/s | 79.4% | 943 ms | 23,035 MiB |
+| C8 | 8,192 tokens | 212.75 tok/s | 375.76 tok/s | 62.1% | 1,825 ms | 23,035 MiB |
+
+*Decode throughput derived as C × 1000 / mean TPOT. Acceptance is per drafted
+token and swings with the sampled content, hence the C2/C8 dips. Peak VRAM is
+flat because vLLM preallocates its pool at startup.
+
+Same protocol on ninfer-3090's published numbers, same model, same card:
+
+| Cohort | ninfer e2e | this repo e2e | ninfer decode | this repo decode |
+|---|---|---|---|---|
+| C1 | 70.19 | **81.85** (+17%) | 71.00 | **83.47** |
+| C2 | 89.43 | **119.38** (+33%) | 90.66 | **136.99** |
+| C4 | 97.89 | **243.62** (+149%) | 100.28 | **281.69** |
+| C8 | 161.28 | **212.75** (+32%) | 165.33 | **375.76** |
+
+(And from C8 up you'd switch to [batch mode](../batch/) anyway, which does
+289.6 tok/s e2e on this same C8 protocol.)
+
+### Choosing a speculation method
+
+Earlier shootout with shorter outputs (256/256), including the community
 [DSpark](https://huggingface.co/RadixArk/Qwen3.8-27B-DSpark) draft model for
 this exact target:
 

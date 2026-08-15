@@ -21,7 +21,10 @@ MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound}
 PORT=${PORT:-18020}
 MAX_LEN=${MAX_LEN:-150000}
 MAX_SEQS=${MAX_SEQS:-8}
-GPU_UTIL=${GPU_UTIL:-0.972}
+# 0.90 here, NOT batch mode's 0.972: the DeltaNet workspace in the MTP decode
+# path allocates beyond the startup memory profile, and long generations OOM
+# the engine at higher settings. With 8 slots the bigger pool buys nothing.
+GPU_UTIL=${GPU_UTIL:-0.90}
 API_SERVERS=${API_SERVERS:-1}
 DRAFT_TOKENS=${DRAFT_TOKENS:-2}
 

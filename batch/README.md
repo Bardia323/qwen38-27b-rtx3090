@@ -18,6 +18,19 @@ eval runs. Tuned for aggregate tokens per second, not per-request latency.
 *TTFT at saturation is queue time — the bench fires all requests at once.
 Under real traffic at lower utilization it's sub-second.
 
+Cohort protocol (C requests, 1,024 output tokens each — comparable to the
+[single-user tables](../single-user/README.md)):
+
+| Cohort | Total output | End-to-end throughput | Decode throughput | Mean TTFT | Peak VRAM |
+|---|---|---|---|---|---|
+| C1 | 1,024 tokens | 45.68 tok/s | 46.08 tok/s | 223 ms | 23,961 MiB |
+| C2 | 2,048 tokens | 82.44 tok/s | 83.75 tok/s | 406 ms | 23,961 MiB |
+| C4 | 4,096 tokens | 155.13 tok/s | 159.87 tok/s | 806 ms | 23,961 MiB |
+| C8 | 8,192 tokens | 289.60 tok/s | 307.81 tok/s | 1,693 ms | 23,961 MiB |
+
+Below ~C8, single-user mode's speculative decoding is faster; batch mode pulls
+ahead from C8 and keeps scaling to C64.
+
 Two readings from the table: long-input workloads are prefill-bound (the
 machine sustains ~1000 total tok/s of prompt processing no matter the shape),
 and single-stream on an idle server is a respectable 45 tok/s even without

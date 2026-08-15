@@ -8,31 +8,33 @@ API with key auth, and two ready-made configs depending on what you're doing:
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
 | aggregate, 64 concurrent | **417 tok/s** (672 peak) | n/a (8 slots) |
-| aggregate, 8 concurrent | **250 tok/s** | 241 tok/s |
-| single-stream speed | 45 tok/s (21.4 ms/token) | **63 tok/s** (14.9 ms/token) |
+| single-stream (1,024-token generations) | 46 tok/s | **82 tok/s** |
 | trick | big batches, no speculation | MTP speculative decoding |
 
 Both share the same install; the mode is just which launch script you run.
-The crossover is around 4-8 concurrent users: above that, plain batching beats
-speculation and you should be in batch mode.
-
-All numbers: `vllm bench serve`, 256 in / 256 out, RTX 3090 at a 250 W power
-limit (stock is 350 W, so these are probably conservative).
+The crossover is around 8 concurrent users: below that, speculation wins;
+above, plain batching. All numbers measured with `vllm bench serve` on an
+RTX 3090 at a 250 W power limit (stock is 350 W, so probably conservative).
+Full tables in each mode's README.
 
 ### vs. ninfer-3090
 
-[ninfer-3090](https://github.com/Don-Chad/ninfer-3090) publishes these numbers
-for the same model on the same card; measured ours side by side:
+[ninfer-3090](https://github.com/Don-Chad/ninfer-3090) publishes cohort
+benchmarks for this exact model on this exact card. Same protocol (C requests,
+1,024 output tokens each), end-to-end throughput:
 
-| | ninfer-3090 (MTP3) | this repo | |
+| Cohort | ninfer-3090 (MTP3) | this repo (single-user mode) | |
 |---|---|---|---|
-| 1 concurrent, decode rate | 70.2 tok/s | 67 tok/s (14.9 ms TPOT) | -5% |
-| 8 concurrent, aggregate | 161.3 tok/s | 249.7 tok/s | **+55%** |
-| 64 concurrent, aggregate | not supported (C8 max) | 417.5 tok/s | |
-| max context | 262k claimed for other models, 16k in their Qwen3.8 examples | 150k | |
+| C1 | 70.19 tok/s | 81.85 tok/s | +17% |
+| C2 | 89.43 tok/s | 119.38 tok/s | +33% |
+| C4 | 97.89 tok/s | 243.62 tok/s | +149% |
+| C8 | 161.28 tok/s | 212.75 tok/s | +32% |
+| C8, batch mode | — | 289.60 tok/s | +80% |
+| C64, batch mode | not supported | 417.5 tok/s | |
 
-Their single-user number is ~5% ahead on a power-capped card; everything at
-concurrency 2+ is a clear win for vLLM's continuous batching.
+Peak VRAM is comparable (23.0 GiB vs their 22.1 GiB at C8). Their engine is
+good work — the gap is mostly vLLM's continuous batching plus the extra 2.6 GB
+of cache pages this repo's embedding requant frees up.
 
 ## Why this isn't just `vllm serve`
 
@@ -152,9 +154,12 @@ Things that each cost us hours, in rough order of pain:
 ## Full 256k context?
 
 Doesn't fit, and no serving engine changes that: fp8 KV for 262k tokens is
-8.4 GB on its own, plus 14.3 GB of weights, plus state pages. ~150k is the
-honest ceiling for this model on 24 GB. If you need the full window, that's
-what 32 GB cards are for.
+8.4 GB on its own, plus 14.3 GB of weights, plus state pages. After the
+embedding requant the cache pool holds 200k tokens, so the real ceiling is
+~195k for a single request; we ship 150k as the default because a max-length
+request at the ceiling monopolizes the whole pool while it runs. Raise
+`MAX_LEN` toward 195000 if you want it. The remaining gap to 262k is ~2.5 GB
+that a 24 GB card simply doesn't have — that's what 32 GB cards are for.
 
 ## License
 
