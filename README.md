@@ -17,6 +17,12 @@ above, plain batching. All numbers measured with `vllm bench serve` on an
 RTX 3090 at a 250 W power limit (stock is 350 W, so probably conservative).
 Full tables in each mode's README.
 
+Prefill is its own budget, independent of mode and — importantly — of
+concurrency: ~1,210 tok/s of prompt processing at 1k inputs, degrading only
+to 795 tok/s at 100k (just 16 of 64 layers pay quadratic attention). A 100k
+prompt costs ~2 minutes of TTFT, and concurrent prompts queue linearly behind
+each other. Full matrix in [batch/README.md](batch/README.md#prefill).
+
 ### vs. ninfer-3090
 
 [ninfer-3090](https://github.com/Don-Chad/ninfer-3090) publishes cohort
