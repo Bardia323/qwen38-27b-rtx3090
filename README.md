@@ -49,22 +49,23 @@ Three things in this repo that stock vLLM doesn't give you:
    size: 48 of the 64 layers are Gated DeltaNet with a fixed ~49 MB state per
    sequence, so concurrency is bounded by the memory pool, not by KV cache.
    Combined effect was +18% aggregate throughput.
-2. **A two-line vLLM patch.** vLLM ships a dequant-on-gather kernel for
+2. **A small vLLM patch.** vLLM ships a dequant-on-gather kernel for
    int-quantized embedding tables but the qwen3_5 model code never wires it
-   up. `patches/qwen3_5-embed-quant.patch` fixes that. Reapply after vLLM
-   upgrades.
+   up — neither in the main model nor in the MTP draft module that single-user
+   mode depends on. `patches/qwen3_5-embed-quant.patch` fixes both (two lines
+   each). Reapply after vLLM upgrades.
 3. **Tuned flags that are easy to get wrong**, each documented in the launch
    scripts and the gotchas below.
 
 ### What each quantization step buys
 
-Measured cumulatively on the 3090, 256 in / 256 out at 64 concurrent. On this
-architecture spare VRAM converts directly into batch capacity (see gotcha 4),
-which is why the weight savings show up as throughput:
+Measured cumulatively on the 3090, 256 in / 256 out at 64 concurrent. As
+described in point 1 above, spare VRAM converts directly into batch capacity
+on this architecture, which is why the weight savings show up as throughput:
 
 | step | what it does | weights in VRAM | cache pool | aggregate |
 |---|---|---|---|---|
-| W4A16 AutoRound body (as published) | all linears on int4 Marlin kernels | 16.84 GB | 66.7k tokens | 370 tok/s (8k ctx) |
+| W4A16 AutoRound body (as published) | all linears on int4 Marlin kernels | 16.84 GB | 66.7k tokens | 370 tok/s (48 conc, 8k ctx) |
 | + fp8 KV cache | halves KV bytes per token | 16.84 GB | 155.2k tokens | 354 tok/s, but 131k+ context becomes possible at all |
 | + lm_head int8 (`quant_lm_head.py`) | logits matmul moves to int8 Marlin, 2.5 GB bf16 freed | 15.43 GB | 192.4k tokens | 398 tok/s |
 | + embed_tokens int8 (`quant_embed.py` + patch) | embedding gather dequantizes on the fly | 14.26 GB | 200.0k tokens | 417 tok/s |
@@ -138,15 +139,22 @@ Things that each cost us hours, in rough order of pain:
    DeltaNet prefill kernels allocate transient workspace; without it the
    allocator fragments and the engine OOMs at runtime once
    `gpu-memory-utilization` goes past ~0.975.
-3. **Bigger prefill chunks make things worse.** `--max-num-batched-tokens
+3. **With MTP enabled, even that isn't enough — single-user mode runs
+   `gpu-memory-utilization 0.90`.** The speculative decode path's DeltaNet
+   workspace grows beyond what vLLM's startup memory profiling measures, and
+   the engine dies mid-request on long generations at 0.95+. It survives short
+   benchmarks, which is exactly how it fools you: our 256-token runs passed,
+   1,024-token runs crashed reliably. The lower setting costs nothing at 8
+   sequence slots.
+4. **Bigger prefill chunks make things worse.** `--max-num-batched-tokens
    8192` inflates the profiled activation peak, which shrinks the cache pool,
    which caps concurrency. 2048 wins on this card.
-4. **Benchmark twice.** The first run after any restart includes JIT warmup
+5. **Benchmark twice.** The first run after any restart includes JIT warmup
    and reads 30-50% low. We've seen 216 vs 402 tok/s, same config, back to
    back.
-5. **`--language-model-only` drops the vision tower cleanly** (no weights
+6. **`--language-model-only` drops the vision tower cleanly** (no weights
    loaded). If you don't need images, that's 2.7 GB.
-6. **Don't chase the DeltaNet kernels.** `bench/tune_gdn.py` microbenchmarks
+7. **Don't chase the DeltaNet kernels.** `bench/tune_gdn.py` microbenchmarks
    the decode kernel across block/warp configs: it already runs at ~85% of the
    3090's memory bandwidth and every variant lands within 3%. Kept in the repo
    so you don't spend the afternoon we spent.

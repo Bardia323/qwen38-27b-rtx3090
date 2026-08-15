@@ -92,6 +92,7 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 | `DRAFT_TOKENS` | 2 | speculative depth. 3 measured slightly worse on general text (see table); might pay off on repetitive/code-heavy prompts |
 | `MAX_SEQS` | 8 | plenty for a few users; keeps state-slot reservations small |
 | `MAX_LEN` | 150000 | |
+| `GPU_UTIL` | 0.90 | deliberately lower than batch mode's 0.972 — the MTP decode path OOMs on long generations above this (main README, gotcha 3). Don't raise |
 | `PORT` | 18020 | |
 
 ## Switching modes
