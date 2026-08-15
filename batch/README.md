@@ -31,8 +31,29 @@ Cohort protocol (C requests, 1,024 output tokens each — comparable to the
 Below ~C8, single-user mode's speculative decoding is faster; batch mode pulls
 ahead from C8 and keeps scaling to C64.
 
-Two readings from the table: long-input workloads are prefill-bound (the
-machine sustains ~1000 total tok/s of prompt processing no matter the shape),
+### Prefill
+
+Measured with 1-token outputs so it's pure prompt processing (applies to both
+modes — prefill doesn't go through the speculative path):
+
+| input length | conc 1 | conc 4 | conc 8-16 | single-request TTFT |
+|---|---|---|---|---|
+| 1k | 1,210 tok/s | 1,215 | 1,213 | 0.85 s |
+| 4k | 1,185 | 1,185 | 1,183 | 3.5 s |
+| 16k | 1,112 | 1,117 | 1,116 | 14.7 s |
+| 64k | 906 | 908 | — | 72 s |
+| 100k | 795 | — | — | 129 s |
+
+Two things to plan capacity around. First, concurrency does nothing for
+prefill: chunked prefill feeds everything through the same 2,048-token
+per-step budget, so ~1,200 tok/s of prompt processing is a fixed resource the
+whole server shares, and queueing is linear (four 16k prompts at once means
+the last one waits ~48 s). Second, the falloff with length is mild — only
+~34% from 1k to 100k — because just 16 of 64 layers pay quadratic attention;
+this is one of the places the hybrid architecture genuinely helps.
+
+Two readings from the table: long-input workloads are prefill-bound (see the
+prefill table below — prompt processing is a fixed ~0.8-1.2k tok/s resource),
 and single-stream on an idle server is a respectable 45 tok/s even without
 speculation. If sub-20 ms tokens for one user is the goal, use
 [single-user mode](../single-user/) instead.
