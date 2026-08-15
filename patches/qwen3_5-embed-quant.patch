@@ -1,0 +1,20 @@
+Route embed_tokens through vLLM's quantized-embedding path
+(CompressedTensorsEmbeddingWNA16Int). The kernel exists upstream; the qwen3_5
+model code just never passes quant_config to VocabParallelEmbedding.
+
+Apply from the installed vllm package directory:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/qwen3_5-embed-quant.patch
+
+Written against vLLM 0.27.1. Reapply after upgrades.
+
+--- a/model_executor/models/qwen3_5.py
++++ b/model_executor/models/qwen3_5.py
+@@ -243,6 +243,8 @@
+         self.embed_tokens = VocabParallelEmbedding(
+             self.vocab_size,
+             config.hidden_size,
++            quant_config=self.quant_config,
++            prefix=maybe_prefix(prefix, "embed_tokens"),
+         )
+
+         def get_layer(prefix: str):
