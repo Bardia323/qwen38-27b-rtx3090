@@ -58,17 +58,24 @@ carrying more drafts. Probabilistic drafting samples the draft from the MTP
 distribution instead of taking its argmax, which is what rejection sampling
 wants at temperature > 0; at greedy it changes nothing.
 
-k=4 is the fastest but not shipped: on vLLM 0.27.1 the engine dies with an
-illegal memory access in the DeltaNet spec-decode path as soon as one request
-finishes while another is mid-generation (any k=4 config, with or without
-our patches; the vendored PR #50021 bounds fix does not cure it; club-3090
-sees the same "n=4 eventually dies, n=3 stable" on their rigs, and vLLM has a
-family of open reports of MTP illegal-memory-access crashes on Qwen3.5/3.6,
+k=4 is the fastest but not the default: on the FlashInfer attention backend
+(the only one that supports fp8 KV on Ampere, and fp8 KV is what makes 150k
+context fit) vLLM 0.27.1 dies with an illegal memory access as soon as one
+request finishes while another is mid-generation with 4 drafts (with or
+without our patches; the vendored PR #50021 bounds fix does not cure it;
+club-3090 sees the same "n=4 eventually dies, n=3 stable" on their rigs, and
+vLLM has a family of open MTP illegal-memory-access reports on Qwen3.5/3.6,
 e.g. [#40756](https://github.com/vllm-project/vllm/issues/40756),
-[#36498](https://github.com/vllm-project/vllm/issues/36498)). k=3 passed every
-concurrency soak we ran (C2/C4/C8 with staggered finishes, 100k-token prompt,
-4×6k-token generations); if you see the crash anyway, `DRAFT_TOKENS=2` costs
-~5% and is the most conservative setting.
+[#36498](https://github.com/vllm-project/vllm/issues/36498)). The same k=4
+config on the FlashAttention backend (bf16 KV) runs clean at C2/C4, so the
+bug is in the FlashInfer spec-decode path. Hence two configs:
+
+- `CTX=long` (default): FlashInfer, fp8 KV, **150k context**, k=3 → 84 / 89 tok/s
+- `CTX=fast`: FlashAttention, bf16 KV, **~64k context**, k=4 → ~90 / ~98 tok/s
+
+k=3 passed every concurrency soak we ran (C2/C4/C8 with staggered finishes,
+100k-token prompt, 4×6k-token generations); if you see the crash anyway,
+`DRAFT_TOKENS=2` costs ~5% and is the most conservative setting.
 
 Why not 150? The verify pass alone reads 13.9 GB of weights (~21 ms at this
 card's bandwidth) and the shipped MTP head agrees with the target on only ~70%
@@ -103,9 +110,10 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 
 | var | default | notes |
 |---|---|---|
-| `DRAFT_TOKENS` | 3 | speculative depth; 4 is ~7% faster single-stream but crashes when requests churn (see above), 6 is slower |
+| `CTX` | `long` | `long`: fp8 KV / FlashInfer / 150k / 3 drafts. `fast`: bf16 KV / FlashAttention / 64k / 4 drafts, ~7% faster (see above) |
+| `DRAFT_TOKENS` | 3 (4 for `CTX=fast`) | speculative depth; 6 is slower |
 | `MAX_SEQS` | 8 | plenty for a few users; each request holds k+1 recurrent-state slots |
-| `MAX_LEN` | 150000 | 150k needs `GPU_UTIL` 0.93 |
+| `MAX_LEN` | 150000 (65536 for `CTX=fast`) | 150k needs `GPU_UTIL` 0.93 |
 | `GPU_UTIL` | 0.93 | soak-tested with a 100k prompt and 4×6k-token generations; batch mode's 0.972 OOMs in the MTP path (main README, gotcha 4) |
 | `MTP_DRAFT_VOCAB` | 1 | set 0 to draft with the full lm_head (more acceptance, slower per draft) |
 | `PORT` | 18020 | |

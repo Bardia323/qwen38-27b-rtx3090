@@ -8,7 +8,7 @@ API with key auth, and two ready-made configs depending on what you're doing:
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
 | aggregate, 64 concurrent (128 in / 512 out) | **876 tok/s** end-to-end, ~1,050 steady-state decode (1,025 / ~1,150 with all layers int8) | n/a (8 slots) |
-| single-stream, realistic prompts | 46 tok/s | **84 tok/s** at default sampling, 89 tok/s greedy |
+| single-stream, realistic prompts | 46 tok/s | **84 tok/s** at default sampling, 89 tok/s greedy (90 / 98 with `CTX=fast`, 64k context) |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 3 cheap drafts |
 
 Both share the same install; the mode is just which launch script you run.
@@ -175,10 +175,12 @@ greedy):
 Cheaper drafts lose ~10 points of acceptance (the int8 draft module and the
 truncated vocabulary each cost a few) and still win, because a step went from
 ~32 ms to ~27 ms while carrying more drafts. Going deeper (k=6) loses again.
-k=4 is the knee, but on vLLM 0.27.1 four drafts crash the engine (illegal
-memory access in the DeltaNet spec path) as soon as one request finishes while
-another is mid-generation — club-3090 reports the same "n=4 eventually dies,
-n=3 stable" pattern — so the shipped config drafts 3 and gives up ~7%.
+k=4 is the knee, but on vLLM 0.27.1's FlashInfer backend (needed for fp8 KV,
+i.e. for 150k context) four drafts crash the engine with an illegal memory
+access as soon as one request finishes while another is mid-generation —
+club-3090 reports the same "n=4 eventually dies, n=3 stable" pattern — so the
+default config drafts 3 and gives up ~7%; `CTX=fast` (FlashAttention, bf16 KV,
+~64k context) keeps k=4.
 
 ## Setup
 
