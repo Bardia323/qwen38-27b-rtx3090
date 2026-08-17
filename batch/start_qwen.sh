@@ -28,10 +28,26 @@ cd "$REPO"
 
 MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound}
 PORT=${PORT:-18020}
-MAX_LEN=${MAX_LEN:-150000}
 MAX_SEQS=${MAX_SEQS:-64}
-GPU_UTIL=${GPU_UTIL:-0.972}
 API_SERVERS=${API_SERVERS:-1}
+# KV=fp8 (default): FlashInfer fp8 KV cache, 150k context, fastest.
+# KV=kvarn: the KVarN 4-bit-key / 2-bit-value cache (kvarn/ in this repo,
+# needs `bash kvarn/install.sh` once): 262k context, ~2x the token capacity,
+# +0.2% perplexity, ~20% slower decode at long context and lower short-request
+# throughput (see README "262k context").
+KV=${KV:-fp8}
+if [ "$KV" = "kvarn" ]; then
+  MAX_LEN=${MAX_LEN:-262144}
+  GPU_UTIL=${GPU_UTIL:-0.93}
+  KV_ARGS="--kv-cache-dtype kvarn_k4v2_g128 --block-size 128"
+  # fp16 staging pool for the tiles still being written: share of free memory
+  # after weights; 0.25 keeps all 64 slots, smaller values cap max-num-seqs
+  export KVARN_POOL_MEM_FRAC=${KVARN_POOL_MEM_FRAC:-0.25}
+else
+  MAX_LEN=${MAX_LEN:-150000}
+  GPU_UTIL=${GPU_UTIL:-0.972}
+  KV_ARGS="--kv-cache-dtype fp8"
+fi
 # int8 activations: "int8" (default) or empty for W4A16; layers: regex on the
 # layer name, "mlp" (default: gate_up_proj + down_proj) or "gate_up"
 INT8_ACT=${INT8_ACT-int8}
@@ -58,7 +74,7 @@ exec venv/bin/vllm serve "$MODEL" \
   --max-num-seqs $MAX_SEQS \
   --api-server-count $API_SERVERS \
   --language-model-only \
-  --kv-cache-dtype fp8 \
+  $KV_ARGS \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \
   --max-num-batched-tokens 2048 \

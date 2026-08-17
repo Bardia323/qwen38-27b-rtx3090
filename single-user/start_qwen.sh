@@ -42,11 +42,18 @@ GPU_UTIL=${GPU_UTIL:-0.93}
 API_SERVERS=${API_SERVERS:-1}
 # CTX=long (default): fp8 KV via FlashInfer, 150k context, 3 drafts.
 # CTX=fast: bf16 KV via FlashAttention, ~64k context, 4 drafts (~+7%).
+# CTX=huge: KVarN 4/2-bit KV cache (kvarn/ in this repo, run kvarn/install.sh
+#           once), 200k context with MTP, ~5% slower (see README "262k context").
 CTX=${CTX:-long}
 if [ "$CTX" = "fast" ]; then
   MAX_LEN=${MAX_LEN:-65536}
   DRAFT_TOKENS=${DRAFT_TOKENS:-4}
   ATTN_ARGS="--attention-backend FLASH_ATTN --kv-cache-dtype bfloat16"
+elif [ "$CTX" = "huge" ]; then
+  MAX_LEN=${MAX_LEN:-200000}
+  DRAFT_TOKENS=${DRAFT_TOKENS:-3}
+  ATTN_ARGS="--kv-cache-dtype kvarn_k4v2_g128 --block-size 128"
+  export KVARN_POOL_MEM_FRAC=${KVARN_POOL_MEM_FRAC:-0.15}
 else
   MAX_LEN=${MAX_LEN:-150000}
   DRAFT_TOKENS=${DRAFT_TOKENS:-3}

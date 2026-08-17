@@ -110,7 +110,7 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 
 | var | default | notes |
 |---|---|---|
-| `CTX` | `long` | `long`: fp8 KV / FlashInfer / 150k / 3 drafts. `fast`: bf16 KV / FlashAttention / 64k / 4 drafts, ~7% faster (see above) |
+| `CTX` | `long` | `long`: fp8 KV / FlashInfer / 150k / 3 drafts. `fast`: bf16 KV / FlashAttention / 64k / 4 drafts, ~7% faster (see above). `huge`: KVarN 4/2-bit KV / 200k / 3 drafts, ~5% slower (needs `bash kvarn/install.sh`; main README "262k context") |
 | `DRAFT_TOKENS` | 3 (4 for `CTX=fast`) | speculative depth; 6 is slower |
 | `MAX_SEQS` | 8 | plenty for a few users; each request holds k+1 recurrent-state slots |
 | `MAX_LEN` | 150000 (65536 for `CTX=fast`) | 150k needs `GPU_UTIL` 0.93 |

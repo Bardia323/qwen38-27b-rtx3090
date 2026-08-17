@@ -212,6 +212,8 @@ venv/bin/python build_draft_vocab.py models/Qwen3.8-27B-W4A16-AutoRound --ids dr
 for p in patches/*.patch; do
   patch -p1 -d venv/lib/python3.12/site-packages/vllm < $p
 done
+# optional: the KVarN 4/2-bit KV cache for 262k context (see below)
+bash kvarn/install.sh
 
 # api key
 openssl rand -hex 24 > api_key.txt
@@ -286,17 +288,45 @@ Things that each cost us hours, in rough order of pain:
     3090's memory bandwidth and every variant lands within 3%. The state dtype
     (point 3 above) is the lever, not the kernel.
 
-## Full 256k context?
+## 262k context: the KVarN KV cache
 
-Doesn't fit, and no serving engine changes that: fp8 KV for 262k tokens is
-8.4 GB on its own, plus 14.3 GB of weights, plus state pages. After the
-embedding requant the cache pool holds 200k tokens, so the real ceiling is
-~195k for a single request; we ship 150k as the default because a max-length
-request at the ceiling monopolizes the whole pool while it runs. Raise
-`MAX_LEN` toward 195000 if you want it. The remaining gap to 262k is ~2.5 GB
-that a 24 GB card simply doesn't have — that's what 32 GB cards are for.
-(A 2-4 bit KV cache such as [KVarN](https://github.com/huawei-csl/KVarN) would
-close it, but it lives in a vLLM 0.23 fork; not ported here.)
+With fp8 KV the pool holds ~200k tokens, so 150k is the shipped max and ~195k
+the ceiling; the model's full 262,144 is out of reach because 16 attention
+layers × 4 KV heads × 256 dims × 2 bytes (K+V, fp8) is 2 KB per token. The
+way past that is a smaller cache, not a different engine, and
+[KVarN](https://github.com/huawei-csl/KVarN) (Huawei CSL) has the best one we
+know of: Hadamard rotation + iterative variance normalization + 4-bit keys /
+2-bit values per 128-token tile, at ~840 B/token/layer here. It ships as a
+fork of vLLM 0.23; [kvarn/](kvarn/) is our port of its dense backend onto the
+0.27.1 this repo runs (`bash kvarn/install.sh`, then `KV=kvarn` in batch mode
+or `CTX=huge` in single-user mode).
+
+Measured on the 3090 (`--kv-cache-dtype kvarn_k4v2_g128 --block-size 128`,
+fp16 recurrent state, batch defaults otherwise):
+
+| | fp8 KV (default) | KVarN k4v2 |
+|---|---|---|
+| KV pool, batch mode | ~205-225k tokens (150k max, ~195k ceiling) | 302-344k tokens with 64 slots, **420k with 4 slots — 262k fits with room for 1.6 such requests** |
+| KV pool, single-user mode (MTP-3) | 150k max | 200k max |
+| needle-in-a-haystack, greedy | — | correct at 4k / 16k / 30k / 100k / 240k, both depths |
+| perplexity (en/da/code, 33k tokens) | 8.223 | 8.236 (+0.16%) |
+| single stream at 100k context | TTFT 99 s, 27 ms/token | TTFT 94 s, 33 ms/token |
+| 4 × 60k-token requests, 1,024 out | only 3 fit → 256 s total, ITL 33 ms | all 4 resident → 242 s total, ITL 49 ms |
+| 64 concurrent short requests (128/512) | 876 tok/s | 692 tok/s (38 resident: 2048-token blocks cost as much per short request as fp8's 800-token block) |
+| MTP-3 single stream, real prompts | 84 / 89 tok/s | 79 / 88 tok/s |
+
+So: same VRAM, 1.6-2× the tokens, full 262k context, quality intact, and a
+speed tax of ~20% on long-context decode and more on short-request throughput
+(the fp16 staging pool for tiles-in-progress and the Sinkhorn flush at prefill
+are the costs). Which is why it's a mode and not the default: `KV=kvarn`
+when the workload is long documents, `fp8` for everything else. Port notes and
+what to watch when bumping vLLM are in [kvarn/README.md](kvarn/README.md).
+
+(vLLM 0.27.1 also has TurboQuant built in — `--kv-cache-dtype turboquant_4bit_nc`
+gives a similar 413k-token pool here and about 15% slower decode, but its
+chunked-prefill path allocates O(context) scratch outside the memory profile
+and OOMs at 32k+ prompts on this card at 0.972 utilization, and at 128k even
+at 0.90. KVarN's prefill path is bounded and did 240k.)
 
 ## License
 
