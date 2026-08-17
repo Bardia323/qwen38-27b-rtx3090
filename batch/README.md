@@ -46,9 +46,20 @@ ahead from C8 and keeps scaling to C64.
 
 ### Prefill
 
-Measured with 1-token outputs so it's pure prompt processing. W4A16 numbers
-(single-user mode, and batch mode with `INT8_ACT=` unset); the int8 tensor-core
-path is faster still (~+40% at 1k, e.g. 4.2 s TTFT for 64×256 tokens vs 5.6 s):
+Measured with 1-token outputs so it's pure prompt processing. Batch mode
+default (int8 tensor cores on the MLP GEMMs):
+
+| input length | conc 1 | conc 4 | conc 8-16 | single-request TTFT |
+|---|---|---|---|---|
+| 1k | 1,812 tok/s | 1,820 | 1,806 | 0.56 s |
+| 4k | 1,758 | 1,757 | 1,747 | 2.3 s |
+| 16k | 1,595 | 1,601 | 1,599 | 10.3 s |
+| 64k | 1,182 | 1,184 | — | 55 s |
+| 100k | 997 | — | — | 103 s |
+
+W4A16 kernels (single-user mode, or batch mode with `INT8_ACT=` unset) for
+comparison — the int8 path is +50% at 1k, tapering to +25% at 100k as the 16
+attention layers take a bigger share:
 
 | input length | conc 1 | conc 4 | conc 8-16 | single-request TTFT |
 |---|---|---|---|---|
@@ -62,9 +73,9 @@ Two things to plan capacity around. First, concurrency does nothing for
 prefill: chunked prefill feeds everything through the same 2,048-token
 per-step budget, so prompt processing is a fixed resource the whole server
 shares, and queueing is linear (four 16k prompts at once means the last one
-waits ~48 s). Second, the falloff with length is mild — only ~34% from 1k to
-100k — because just 16 of 64 layers pay quadratic attention; this is one of
-the places the hybrid architecture genuinely helps.
+waits ~40 s). Second, the falloff with length is mild — ~45% from 1k to 100k
+on the int8 path, ~34% on W4A16 — because just 16 of 64 layers pay quadratic
+attention; this is one of the places the hybrid architecture genuinely helps.
 
 ## Setup
 

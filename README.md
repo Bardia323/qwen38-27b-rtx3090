@@ -24,12 +24,13 @@ on this checkpoint until a sign bug is worked around (1.4×), and making
 speculative drafts cheap enough that three of them pay off (1.3×). All of it is
 in `patches/` and the two `quant_*.py` / `build_draft_vocab.py` scripts.
 
-Prefill is its own budget, independent of mode and of concurrency: ~1,210
-tok/s of prompt processing at 1k inputs with the W4A16 kernels (single-user
-mode), roughly 40% more on batch mode's int8 tensor-core path, degrading
-gently with length because only 16 of 64 layers pay quadratic attention. A
-100k prompt costs ~2 minutes of TTFT, and concurrent prompts queue linearly
-behind each other. Full matrix in [batch/README.md](batch/README.md#prefill).
+Prefill is its own budget, independent of mode and of concurrency: ~1,810
+tok/s of prompt processing at 1k inputs in batch mode (int8 tensor cores;
+~1,210 tok/s on the W4A16 kernels single-user mode uses), degrading gently
+with length because only 16 of 64 layers pay quadratic attention — 1,000 tok/s
+at 100k. A 100k prompt costs ~100 s of TTFT (~130 s in single-user mode), and
+concurrent prompts queue linearly behind each other. Full matrix in
+[batch/README.md](batch/README.md#prefill).
 
 ### vs. ninfer-3090
 
