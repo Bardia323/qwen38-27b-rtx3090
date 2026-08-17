@@ -69,11 +69,14 @@ sampling:
 |---|---|---|
 | strict, W4A16 stack | **78.3** | 79.9 |
 | loose, W4A16 stack | 81.7 | 82.8 |
-| strict, batch mode default (int8 MLP activations) | (running, updated shortly) | |
+| strict, batch mode default (int8 MLP activations, fp16 state) | **78.3** | 80.5 |
+| loose, batch mode default | 80.3 | 82.3 |
 
 Qwen's [model card](https://huggingface.co/Qwen/Qwen3.8-27B) reports **79.5**
 for the unquantized model, so the W4A16 quantization stack costs about one
-point on the headline metric (prompt-level strict).
+point on the headline metric (prompt-level strict), and the batch-mode int8
+activations cost nothing measurable on it (the two runs trade places within
+sampling noise on the sub-metrics).
 
 **Perplexity** on ~33k tokens of held-out text (English Wikipedia, Danish web
 text, Python source), and **GSM8K** (200 test questions, greedy, thinking off):
