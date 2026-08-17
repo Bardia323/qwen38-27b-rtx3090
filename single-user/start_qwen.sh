@@ -49,4 +49,5 @@ exec venv/bin/vllm serve "$MODEL" \
   --max-num-batched-tokens 2048 \
   --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS}" \
   --compilation-config "{\"max_cudagraph_capture_size\":16,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \
+  --reasoning-parser qwen3 \
   ${EXTRA_ARGS}

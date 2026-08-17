@@ -42,6 +42,32 @@ Peak VRAM is comparable (23.0 GiB vs their 22.1 GiB at C8). Their engine is
 good work — the gap is mostly vLLM's continuous batching plus the extra 2.6 GB
 of cache pages this repo's embedding requant frees up.
 
+## Quality: IFBench
+
+Does W4A16 + int8 embeddings + fp8 KV actually cost accuracy on hard tasks?
+We ran [IFBench](https://github.com/allenai/IFBench) (AllenAI's
+out-of-distribution instruction-following benchmark, 299 prompts, official
+eval scripts) against this exact serving stack in batch mode — thinking
+enabled at `reasoning_effort: xhigh` (the model default), model-default
+sampling (temp 1.0, top-p 0.95, top-k 20):
+
+| accuracy | prompt-level | instruction-level |
+|---|---|---|
+| strict | **78.3** | 79.9 |
+| loose | 81.7 | 82.8 |
+
+Qwen's [model card](https://huggingface.co/Qwen/Qwen3.8-27B) reports **79.5**
+for the unquantized model, so the entire quantization stack costs about one
+point on the headline metric (prompt-level strict) — consistent with the
+"no regression we could find" spot checks above.
+
+To reproduce: serve with `--reasoning-parser qwen3` (now in both launch
+scripts) so only final answers are scored, not the thinking; and give
+completions a 60k-token budget — at `xhigh`, 15% of prompts think past 20k
+tokens, and 2 of 299 ran past even 60k (counted as failures).
+
+Terminal-Bench 2.1 results on this stack are coming next.
+
 ## Why this isn't just `vllm serve`
 
 Three things in this repo that stock vLLM doesn't give you:
