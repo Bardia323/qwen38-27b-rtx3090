@@ -87,10 +87,12 @@ this model) is the next lever, not engine work.
 ## Setup
 
 Do the [common setup](../README.md#setup) first (venv, model download,
-requantization, draft head, vLLM patches). Then:
+requantization, draft head, vLLM patches; `bash verify.sh --no-server` checks
+all of it). Then:
 
 ```bash
 bash single-user/start_qwen.sh
+bash bench/run_benchmarks.sh single    # reproduces the tables above
 ```
 
 Or as a service:

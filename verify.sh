@@ -1,0 +1,105 @@
+#!/bin/bash
+# Check that this repo is installed the way the README numbers assume:
+# venv + vLLM version, every patch applied, the model requantized (lm_head,
+# embed_tokens, MTP module, draft head), keys/files present, and — if a
+# server is running — that it answers and which backend/pool it came up with.
+#
+#   bash verify.sh            # everything
+#   bash verify.sh --no-server
+# Exit code: 0 all PASS (WARNs allowed), 1 if anything FAILs.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$HERE"
+NOSRV=0; [ "${1:-}" = "--no-server" ] && NOSRV=1
+FAILS=0
+ok()   { printf "  PASS  %s\n" "$1"; }
+warn() { printf "  WARN  %s\n" "$1"; }
+fail() { printf "  FAIL  %s\n" "$1"; FAILS=$((FAILS+1)); }
+MODEL=${MODEL:-$HERE/models/Qwen3.8-27B-W4A16-AutoRound}
+SP=$HERE/venv/lib/python3.12/site-packages/vllm
+PY=$HERE/venv/bin/python
+
+echo "== environment"
+[ -x "$PY" ] && ok "venv at $HERE/venv" || { fail "no venv/bin/python (see README Setup)"; exit 1; }
+VER=$($PY -c "import vllm; print(vllm.__version__)" 2>/dev/null)
+[ "$VER" = "0.27.1" ] && ok "vllm $VER" || warn "vllm ${VER:-missing} (patches were written against 0.27.1)"
+$PY - <<'EOF' 2>/dev/null || fail "torch cannot see a CUDA GPU"
+import torch; assert torch.cuda.is_available()
+p=torch.cuda.get_device_properties(0)
+print(f"  PASS  GPU: {p.name}, {p.total_memory/2**30:.1f} GiB, sm{p.major}{p.minor}, torch {torch.__version__}")
+EOF
+command -v nvidia-smi >/dev/null && { PL=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader,nounits | head -1); ok "power limit ${PL} W (README numbers are at 250 W)"; }
+for t in triton flashinfer compressed_tensors; do $PY -c "import $t" 2>/dev/null && ok "python module $t" || fail "python module $t missing"; done
+
+echo "== vLLM patches (patches/*.patch)"
+for p in patches/*.patch; do
+  if patch -p1 -R --dry-run -s -d "$SP" < "$p" >/dev/null 2>&1; then ok "$(basename $p) applied"
+  elif patch -p1 -N --dry-run -s -d "$SP" < "$p" >/dev/null 2>&1; then fail "$(basename $p) NOT applied (patch -p1 -d $SP < $p)"
+  else fail "$(basename $p) neither applied nor applicable — vLLM version mismatch?"; fi
+done
+grep -q "VLLM_MARLIN_INT8_INCLUDE_RE" "$SP/envs.py" 2>/dev/null && ok "int8 layer-select env vars registered in envs.py" || fail "envs.py lacks VLLM_MARLIN_INT8_INCLUDE_RE"
+
+echo "== KVarN (optional, kvarn/)"
+if [ -f "$SP/v1/attention/backends/kvarn_attn.py" ]; then
+  if patch -p1 -R --dry-run -s -d "$SP" < kvarn/kvarn-0.27.1.patch >/dev/null 2>&1; then
+    $PY -c "from vllm.v1.attention.backends.registry import AttentionBackendEnum; AttentionBackendEnum.KVARN.get_class()" 2>/dev/null && ok "KVarN backend importable, patch applied (KV=kvarn / CTX=huge available)" || fail "KVarN files present but backend does not import"
+  else fail "KVarN modules present but kvarn-0.27.1.patch not applied (bash kvarn/install.sh)"; fi
+else warn "KVarN not installed (optional; bash kvarn/install.sh for 262k context)"; fi
+
+echo "== model at $MODEL"
+if [ ! -f "$MODEL/config.json" ]; then fail "model not found (README Setup: hf download)"; else
+$PY - "$MODEL" <<'EOF'
+import json, os, sys
+d = sys.argv[1].rstrip("/") + "/"
+c = json.load(open(d + "config.json"))
+qc = c.get("quantization_config", {})
+groups = qc.get("config_groups", {})
+ign = set(qc.get("ignore", []))
+idx = json.load(open(d + "model.safetensors.index.json"))["weight_map"]
+F = 0
+def ok(m): print("  PASS ", m)
+def fail(m):
+    global F
+    print("  FAIL ", m); F += 1
+# lm_head / embed int8
+if "lm_head.weight_packed" in idx and any(g["targets"] == ["re:.*lm_head$"] and g["weights"]["num_bits"] == 8 for g in groups.values()): ok("lm_head requantized to int8 (quant_lm_head.py)")
+else: fail("lm_head not requantized: run quant_lm_head.py")
+if any(k.endswith("embed_tokens.weight_packed") for k in idx) and any(g["targets"] == ["re:.*embed_tokens$"] for g in groups.values()): ok("embed_tokens requantized to int8 (quant_embed.py)")
+else: fail("embed_tokens not requantized: run quant_embed.py")
+if "mtp.layers.0.mlp.down_proj.weight_packed" in idx and "mtp.layers.0.mlp.down_proj" not in ign: ok("MTP draft module quantized (quant_mtp.py)")
+else: print("  WARN  MTP module still bf16 (quant_mtp.py) — single-user mode is slower without it")
+if "mtp.draft_lm_head.weight_packed" in idx and os.path.exists(d + "mtp_draft_vocab_ids.pt"): ok("40k-token draft head present (build_draft_vocab.py)")
+else: print("  WARN  draft head missing (build_draft_vocab.py --ids draft_vocab_ids.json) — single-user mode drafts with the full lm_head")
+missing = [f for f in set(idx.values()) if not os.path.exists(d + f)]
+if missing: fail(f"safetensors shards missing: {missing}")
+else: ok(f"{len(set(idx.values()))} safetensors shards present")
+sys.exit(1 if F else 0)
+EOF
+[ $? -ne 0 ] && FAILS=$((FAILS+1))
+fi
+
+echo "== keys / units"
+[ -s api_key.txt ] || [ -n "${VLLM_API_KEY:-}" ] && ok "API key configured (api_key.txt or VLLM_API_KEY)" || fail "no api_key.txt (openssl rand -hex 24 > api_key.txt)"
+if systemctl --user is-active qwen-serving >/dev/null 2>&1; then ok "systemd user unit qwen-serving active"; else warn "qwen-serving unit not active (fine if you launch the scripts by hand)"; fi
+
+if [ $NOSRV = 0 ]; then
+  echo "== live server (127.0.0.1:${PORT:-18020})"
+  PORT=${PORT:-18020}
+  if curl -sf -o /dev/null http://127.0.0.1:$PORT/health; then
+    ok "/health 200"
+    KEY=${VLLM_API_KEY:-$(cat api_key.txt 2>/dev/null)}
+    R=$(curl -s http://127.0.0.1:$PORT/v1/chat/completions -H "Authorization: Bearer $KEY" -H "Content-Type: application/json" \
+        -d '{"model":"qwen3.8-27b","messages":[{"role":"user","content":"Hvad er hovedstaden i Danmark? Svar med ét ord."}],"max_tokens":8,"temperature":0,"chat_template_kwargs":{"enable_thinking":false}}')
+    echo "$R" | grep -qi "københavn\|copenhagen" && ok "chat completion answers ('$(echo "$R" | $PY -c 'import json,sys; print(json.load(sys.stdin)["choices"][0]["message"]["content"].strip())' 2>/dev/null)')" || fail "chat completion wrong/failed: $(echo "$R" | head -c 200)"
+    LOG=$HERE/qwen.log
+    if [ -f "$LOG" ]; then
+      grep -oE "Using [A-Z_]+ attention backend" "$LOG" | tail -1 | sed 's/^/  INFO  /'
+      grep -oE "GPU KV cache size: [0-9,]+ tokens" "$LOG" | tail -1 | sed 's/^/  INFO  /'
+      grep -oE "Maximum concurrency for [0-9,]+ tokens per request: [0-9.]+x" "$LOG" | tail -1 | sed 's/^/  INFO  /'
+      grep -q "MarlinLinearKernel" "$LOG" && ok "Marlin kernels in use" || true
+      grep -oE "capping max_num_seqs [0-9]+ -> [0-9]+" "$LOG" | tail -1 | sed 's/^/  INFO  KVarN /'
+    fi
+  else warn "no server on :$PORT (start batch/start_qwen.sh or single-user/start_qwen.sh, or pass --no-server)"; fi
+fi
+echo
+[ $FAILS = 0 ] && echo "verify: OK ($FAILS failures)" || echo "verify: $FAILS FAILURE(S)"
+exit $([ $FAILS = 0 ] && echo 0 || echo 1)

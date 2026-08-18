@@ -117,6 +117,13 @@ All overridable as env vars, defaults in the script:
 ## Verify you're getting the numbers
 
 ```bash
+bash verify.sh                       # install + patches + model + live server sanity
+bash bench/run_benchmarks.sh batch   # the tables above (--prefill / --long for the rest)
+```
+
+or by hand:
+
+```bash
 OPENAI_API_KEY=$(cat api_key.txt) venv/bin/vllm bench serve \
   --host 127.0.0.1 --port 18020 \
   --model models/Qwen3.8-27B-W4A16-AutoRound \
