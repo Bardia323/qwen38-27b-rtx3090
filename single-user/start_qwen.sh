@@ -2,30 +2,37 @@
 # Qwen3.8-27B on a single RTX 3090 — SINGLE USER / LOW LATENCY mode.
 #
 # Same base config as batch mode, plus MTP speculative decoding: the checkpoint
-# keeps Qwen's multi-token-prediction head, so the model drafts 3 tokens ahead
-# and verifies them in one pass. Measured on realistic chat prompts: ~84 tok/s
-# single-stream at the model's default sampling, ~91 tok/s greedy (vs 46 tok/s
-# without speculation). Three things make 3 drafts pay off:
-#  - the MTP module is requantized to int8 (quant_mtp.py): 850 -> 430 MB read
-#    per draft
-#  - the drafter scores a 40k-token draft head (build_draft_vocab.py + the
-#    mtp-draft-vocab patch): 210 MB instead of the 1.3 GB lm_head per draft
-#  - draft_sample_method=probabilistic: drafts are sampled from the draft
-#    distribution instead of argmax, which lifts acceptance at temperature > 0
-#    (+15% tok/s at the default temperature 1.0 / top-p 0.95)
+# keeps Qwen's multi-token-prediction head, so the model drafts 3-4 tokens ahead
+# and verifies them in one pass. Measured on realistic chat prompts with the
+# `-fast` model variant (see "Fast variant" below): ~114 tok/s at the model's
+# default sampling, ~124 tok/s greedy (vs 46 tok/s without speculation).
+# What makes 4 drafts pay off, in order of importance:
+#  - the drafter scores a 40k-token draft head (build_draft_vocab.py) — and the
+#    id list matters: a vocabulary counted over the model's OWN outputs covers
+#    97.5% of what it generates (96% on code); the earlier web-text list only 92%
+#    (83% on code), and every miss is a forced rejection (108 vs 98 tok/s greedy)
+#  - the MTP module and lm_head requantized to int4 with GPTQ calibrated on the
+#    model's hidden states (drafter/): 850 -> 215 MB per draft, 1.27 -> 0.65 GB
+#    lm_head per verify, +0.6% perplexity, acceptance unchanged
+#  - patches/spec-decode-attn.patch: split-KV attention for the 5-query verify
+#    step (FA2 leaves 58 of 82 SMs idle there); patches/sampler-...: sort-free
+#    top-k, multi-block softmax, drafts truncated to the target's top-k/top-p
+#  - draft_sample_method=probabilistic: drafts are sampled, not argmax'ed, which
+#    lifts acceptance at temperature > 0
 # Speculative decoding is exact: none of this changes what gets sampled.
 #
-# Why 3 and not 4: k=4 measures ~7% faster at a single stream but on the
-# FlashInfer attention backend (the only one that does fp8 KV on Ampere, and
-# fp8 KV is what makes 150k context fit) the engine dies with an illegal
-# memory access as soon as one request finishes while another is
-# mid-generation (vLLM 0.27.1; club-3090 reports the same "n=4 eventually
-# dies, n=3 stable"). k=3 survived every concurrency soak we threw at it.
-# CTX=fast switches to FlashAttention + bf16 KV, where k=4 runs clean, at the
-# price of a ~64k context: ~90 tok/s sampled / ~98 greedy instead of 84 / 89.
+# CTX=fast (default here): FlashAttention + bf16 KV, 4 drafts, 64k context.
+# CTX=long: fp8 KV via FlashInfer, 150k context, 3 drafts (k=4 crashes on
+#   FlashInfer as soon as one request finishes while another is mid-generation,
+#   vLLM 0.27.1); the split-KV attention patch is bf16-KV only, so ~90/98 tok/s.
+# CTX=huge: KVarN 4/2-bit KV cache (kvarn/), 200k context with MTP.
+#
+# Fast variant: MODEL defaults to models/Qwen3.8-27B-W4A16-AutoRound-fast when it
+# exists (int4-GPTQ lm_head + MTP, own-output draft vocab; drafter/README.md), else
+# the base dir (int8 lm_head/MTP: ~108/107 tok/s with the shipped draft vocab).
 #
 # max-num-seqs is 8 here: fewer state slots to reserve (each request holds
-# k+1 = 4 recurrent-state slots), and past a handful of concurrent users you
+# k+1 recurrent-state slots), and past a handful of concurrent users you
 # should be running batch mode anyway. Int8 activations are pointless at
 # batch size 1 (memory-bound), so this mode stays W4A16.
 
@@ -33,6 +40,9 @@ DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO="$(dirname "$DIR")"
 cd "$REPO"
 
+if [ -z "$MODEL" ] && [ -d "$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast" ]; then
+  MODEL=$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast
+fi
 MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound}
 PORT=${PORT:-18020}
 MAX_SEQS=${MAX_SEQS:-8}
@@ -44,11 +54,14 @@ API_SERVERS=${API_SERVERS:-1}
 # CTX=fast: bf16 KV via FlashAttention, ~64k context, 4 drafts (~+7%).
 # CTX=huge: KVarN 4/2-bit KV cache (kvarn/ in this repo, run kvarn/install.sh
 #           once), 200k context with MTP, ~5% slower (see README "262k context").
-CTX=${CTX:-long}
+CTX=${CTX:-fast}
+# SPEC_ATTN=1: split-KV Triton attention for the multi-query verify step
+# (patches/spec-decode-attn.patch); bf16 KV only, so CTX=fast only.
 if [ "$CTX" = "fast" ]; then
   MAX_LEN=${MAX_LEN:-65536}
   DRAFT_TOKENS=${DRAFT_TOKENS:-4}
   ATTN_ARGS="--attention-backend FLASH_ATTN --kv-cache-dtype bfloat16"
+  export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-1}
 elif [ "$CTX" = "huge" ]; then
   MAX_LEN=${MAX_LEN:-200000}
   DRAFT_TOKENS=${DRAFT_TOKENS:-3}
@@ -80,7 +93,7 @@ exec venv/bin/vllm serve "$MODEL" \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \
   --max-num-batched-tokens 2048 \
-  --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"probabilistic\"}" \
+  --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}" \
   --compilation-config "{\"max_cudagraph_capture_size\":32,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \
   --reasoning-parser qwen3 \
   ${EXTRA_ARGS}

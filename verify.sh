@@ -77,6 +77,9 @@ EOF
 [ $? -ne 0 ] && FAILS=$((FAILS+1))
 fi
 
+echo "== single-user fast variant (optional)"
+if [ -d "$HERE/models/Qwen3.8-27B-W4A16-AutoRound-fast" ]; then ok "fast variant present (int4-GPTQ lm_head/MTP, own-output draft vocab)"; else warn "no models/Qwen3.8-27B-W4A16-AutoRound-fast (venv/bin/python fetch_fast_variant.py; single-user mode is ~15% slower without it)"; fi
+
 echo "== keys / units"
 [ -s api_key.txt ] || [ -n "${VLLM_API_KEY:-}" ] && ok "API key configured (api_key.txt or VLLM_API_KEY)" || fail "no api_key.txt (openssl rand -hex 24 > api_key.txt)"
 if systemctl --user is-active qwen-serving >/dev/null 2>&1; then ok "systemd user unit qwen-serving active"; else warn "qwen-serving unit not active (fine if you launch the scripts by hand)"; fi

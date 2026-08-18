@@ -8,8 +8,8 @@ API with key auth, and two ready-made configs depending on what you're doing:
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
 | aggregate, 64 concurrent (128 in / 512 out) | **876 tok/s** end-to-end, ~1,050 steady-state decode (1,025 / ~1,150 with all layers int8) | n/a (8 slots) |
-| single-stream, realistic prompts | 46 tok/s | **84 tok/s** at default sampling, 89 tok/s greedy (90 / 98 with `CTX=fast`, 64k context) |
-| trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 3 cheap drafts |
+| single-stream, realistic prompts | 46 tok/s | **~114 tok/s** at default sampling, **~124 tok/s** greedy (`CTX=fast`, 64k context; 90 / 98 with `CTX=long`, 150k) |
+| trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention |
 
 Both share the same install; the mode is just which launch script you run.
 The crossover is around 8 concurrent users: below that, speculation wins;
@@ -20,9 +20,12 @@ Full tables in each mode's README.
 Where these numbers came from, in one line each: fixing a per-request memory
 cost that silently capped the batch server at 37 running requests (2.4×), an
 int8-activation kernel path that vLLM already ships but that produces garbage
-on this checkpoint until a sign bug is worked around (1.4×), and making
-speculative drafts cheap enough that three of them pay off (1.3×). All of it is
-in `patches/` and the two `quant_*.py` / `build_draft_vocab.py` scripts.
+on this checkpoint until a sign bug is worked around (1.4×), making
+speculative drafts cheap enough that four of them pay off (1.3×), and — the
+single biggest single-user win — a draft vocabulary counted over the model's
+own outputs instead of web text (1.1×; see "Single-user: 124 tok/s"). All of it
+is in `patches/`, the `quant_*.py` / `build_draft_vocab.py` scripts and
+`drafter/`.
 
 Prefill is its own budget, independent of mode and of concurrency: ~1,810
 tok/s of prompt processing at 1k inputs in batch mode (int8 tensor cores;
@@ -46,7 +49,7 @@ answers, model-default sampling):
 
 | Cohort | ninfer-3090 (MTP3, random tokens) | this repo, batch mode | this repo, single-user mode | |
 |---|---|---|---|---|
-| C1 | 70.19 tok/s | 45.4 tok/s | **83.4 tok/s** | +19% |
+| C1 | 70.19 tok/s | 45.4 tok/s | **~114 tok/s** (`CTX=fast`, fast variant; 83.4 with the 150k `CTX=long` config) | +62% |
 | C2 | 89.43 tok/s | 81.8 tok/s | **146.6 tok/s** | +64% |
 | C4 | 97.89 tok/s | 153.8 tok/s | **256.8 tok/s** | +162% |
 | C8 | 161.28 tok/s | 298.4 tok/s | **327.9 tok/s** | +103% |
@@ -96,11 +99,22 @@ middle row; `INT8_LAYERS=gate_up` and `INT8_ACT=` (off) are one env var away,
 and `INT8_LAYERS=.` gives you the last row.
 
 Single-user mode is W4A16 (int8 activations buy nothing at batch size 1) and
-speculative decoding is exact by construction, so its quality is the W4A16 row.
+speculative decoding is exact by construction, so with the base requantization
+its quality is the W4A16 row. The single-user **fast variant** additionally
+runs lm_head at int4 (GPTQ, calibrated on the model's own hidden states):
+
+| single-user config | PPL en | PPL da | PPL code | PPL all | GSM8K | C1 tok/s (default / greedy) |
+|---|---|---|---|---|---|---|
+| base requantization (int8 lm_head), new draft vocab | 10.68 | 10.85 | 3.05 | 8.045 | 95.5% | 107 / 109 |
+| int4 lm_head, round-to-nearest (not shipped) | 10.81 | 11.09 | 3.07 | 8.17 (+1.5%) | — | 109 / 112 |
+| **fast variant**: int4 lm_head GPTQ + int4 MTP GPTQ | 10.77 | 10.91 | 3.06 | 8.095 (+0.6%) | 96.5% | ~114 / ~124 |
+
+The MTP module's precision never touches output quality (drafts are verified
+exactly); it only moves acceptance, and the calibrated int4 keeps it.
 
 ## Why this isn't just `vllm serve`
 
-Six things in this repo that stock vLLM doesn't give you:
+Seven things in this repo that stock vLLM doesn't give you:
 
 1. **Both embedding matrices requantized.** Qwen3.8-27B has untied embeddings,
    so the public W4A16 quants carry two separate 2.5 GB bf16 matrices (lm_head
@@ -133,16 +147,33 @@ Six things in this repo that stock vLLM doesn't give you:
    codes at load time; `patches/marlin-int8-layer-select.patch` lets you pick
    which layers get int8 activations (and keeps it off the int8-weight lm_head,
    which would otherwise refuse to load).
-5. **Cheap speculative drafts.** The shipped MTP draft module is bf16 (850 MB)
-   and every draft token also runs the full 248k-row lm_head (1.3 GB), so each
+5. **Cheap speculative drafts, and a draft vocabulary that covers what the
+   model actually says.** The shipped MTP draft module is bf16 (850 MB) and
+   every draft token also runs the full 248k-row lm_head (1.3 GB), so each
    extra draft cost ~3 ms and MTP-3 was already slower than MTP-2.
-   `quant_mtp.py` requantizes the draft module to int8, `build_draft_vocab.py`
-   builds a 40k-token draft head from the frequency of tokens in Danish,
-   English and code text (`draft_vocab_ids.json` is the list we ship), and
-   `patches/qwen3_5-mtp-draft-vocab.patch` makes the drafter use it. A draft
-   now costs ~1 ms, three of them pay off, and with `draft_sample_method:
-   probabilistic` the acceptance at temperature 1.0 is nearly what greedy gets.
-6. **Tuned flags that are easy to get wrong**, each documented in the launch
+   `quant_mtp.py` requantizes the draft module (int8; the fast variant uses
+   GPTQ int4, `drafter/`), `build_draft_vocab.py` builds a 40k-token draft head
+   and `patches/qwen3_5-mtp-draft-vocab.patch` makes the drafter use it. A
+   draft now costs ~0.5-1 ms and four of them pay off. The id list matters
+   more than anything else in this repo's single-user numbers: a token outside
+   the draft vocabulary can never be proposed, so it is a guaranteed rejection
+   that also cuts the chain. The list we now ship (`draft_vocab_ids.json`) is
+   counted over 5.4M tokens of the model's own outputs and covers 97.5% of what
+   it generates (96% on code); the earlier web-text list covered 92% (83% on
+   code) and cost 10% of single-stream throughput on its own.
+6. **Two decode-path patches for the multi-query verify step.**
+   `patches/spec-decode-attn.patch`: FlashAttention-2 only splits the KV
+   sequence across thread blocks when a request has one query token; the MTP
+   verify step has five, so a 24-head model runs attention on 24 of the 3090's
+   82 SMs — 57 µs per layer at 1.5k context, 1.3 ms at 16k. A small Triton
+   split-KV kernel replaces it (23 µs / 120 µs). `patches/sampler-small-topk-
+   fast-softmax.patch`: vLLM's top-k/top-p masking sorts the whole 248k vocab
+   for every row and its softmax runs one thread block per row (140 µs for a
+   single 248k-wide row, called several times per step); with top-k ≤ 64 known
+   on the host the mask is one `torch.topk`, the softmax is multi-block, and
+   drafts are sampled from the same truncated support as the target. Together
+   +4% at default sampling.
+7. **Tuned flags that are easy to get wrong**, each documented in the launch
    scripts and the gotchas below, plus vLLM PR
    [#50021](https://github.com/vllm-project/vllm/pull/50021) vendored as
    `patches/vllm-pr50021-gdn-spec-bounds.patch` (bounds checks in the DeltaNet
@@ -170,18 +201,29 @@ greedy):
 | no speculation | 46 / 46 | 1.0 | — |
 | MTP-2 as shipped (bf16 drafter, full head, fp32 state) | 66 / 79 | 2.1 / 2.4 | 65% / 80% |
 | MTP-4, int8 drafter, 40k draft head, fp16 state | 78 / 99 | 2.2 / 2.7 | 58% / 70% |
-| + probabilistic draft sampling | 90 / 98 | 2.6 / 2.7 | 69% / 70% |
-| same with 3 drafts (**shipped**, see below) | **84 / 89** | 2.5 / 2.4 | 69% / 71% |
+| + probabilistic draft sampling (`CTX=fast`, k=4) | 90 / 98 | 2.6 / 2.7 | 69% / 70% |
+| same with 3 drafts on FlashInfer/fp8 KV (`CTX=long`, 150k) | 84 / 89 | 2.5 / 2.4 | 69% / 71% |
+| + sampler patch, split-KV verify attention | 93 / 99 | 2.6 / 2.6 | 69% / 70% |
+| + draft vocab counted over the model's own outputs | 107 / 109 | 2.9 / 2.9 | 74% / 74% |
+| + GPTQ-int4 lm_head (calibrated) | 109 / 112 | 2.8 / 2.8 | 73% / 73% |
+| + GPTQ-int4 MTP module (**fast variant, shipped**) | **~114 / ~124** | 2.8 / 3.0 | 74% / 77% |
 
-Cheaper drafts lose ~10 points of acceptance (the int8 draft module and the
-truncated vocabulary each cost a few) and still win, because a step went from
-~32 ms to ~27 ms while carrying more drafts. Going deeper (k=6) loses again.
-k=4 is the knee, but on vLLM 0.27.1's FlashInfer backend (needed for fp8 KV,
-i.e. for 150k context) four drafts crash the engine with an illegal memory
-access as soon as one request finishes while another is mid-generation —
-club-3090 reports the same "n=4 eventually dies, n=3 stable" pattern — so the
-default config drafts 3 and gives up ~7%; `CTX=fast` (FlashAttention, bf16 KV,
-~64k context) keeps k=4.
+(Steps 4-6 are the same 8-prompt protocol; greedy is deterministic per config
+but differs *between* configs, so single runs carry ±3% on tokens/step.)
+Going deeper (k=5) loses again: 106 / 105. k=4 is the knee, but on vLLM
+0.27.1's FlashInfer backend (needed for fp8 KV, i.e. for 150k context) four
+drafts crash the engine with an illegal memory access as soon as one request
+finishes while another is mid-generation — club-3090 reports the same "n=4
+eventually dies, n=3 stable" pattern — so `CTX=long` drafts 3 and gives up
+~7%; `CTX=fast` (FlashAttention, bf16 KV, ~64k context, the default) keeps k=4
+and is also the only backend the split-KV attention patch applies to.
+
+Two things that did *not* help, measured rather than assumed: fine-tuning the
+MTP head on the model's own outputs (KL halves, greedy top-1 on response
+tokens unchanged; `drafter/README.md`), and retuning Marlin's tile
+configuration for M ≤ 16 on sm86 (`marlin-tune/`: 3-7% per GEMM in isolation,
+nothing measurable end to end — the remaining gap to peak bandwidth is the
+memory system's ramp on 16-92 MB reads, not the kernel).
 
 ## Setup
 
@@ -207,8 +249,12 @@ venv/bin/python quant_embed.py   models/Qwen3.8-27B-W4A16-AutoRound
 venv/bin/python quant_mtp.py     models/Qwen3.8-27B-W4A16-AutoRound
 # 40k-token draft head for single-user mode (uses the shipped id list)
 venv/bin/python build_draft_vocab.py models/Qwen3.8-27B-W4A16-AutoRound --ids draft_vocab_ids.json
+# single-user "fast" variant (~1 GB from the Hub, hardlinks the rest): int4-GPTQ
+# lm_head + drafter; single-user/start_qwen.sh picks it up automatically
+venv/bin/python fetch_fast_variant.py
 
-# patch vllm (all written against 0.27.1; reapply after upgrades)
+# patch vllm (all written against 0.27.1; reapply after upgrades; alphabetical
+# order matters for the two that touch envs.py)
 for p in patches/*.patch; do
   patch -p1 -d venv/lib/python3.12/site-packages/vllm < $p
 done
@@ -297,6 +343,31 @@ Things that each cost us hours, in rough order of pain:
     the decode kernel across block/warp configs: it already runs at ~85% of the
     3090's memory bandwidth and every variant lands within 3%. The state dtype
     (point 3 above) is the lever, not the kernel.
+
+12. **The draft vocabulary is the single-user ceiling.** A draft head can only
+    propose tokens in its id list; a miss is a certain rejection that also ends
+    the chain. Count the list over the model's *own* outputs (`drafter/gen_data.py`,
+    then the frequency step in `build_draft_vocab.py`), not over web text —
+    92% vs 97.5% coverage was the difference between 98 and 109 tok/s greedy.
+    Coverage saturates around 40k rows; the model only ever emits ~54k distinct
+    tokens.
+13. **FlashAttention-2 does not split KV for multi-query decode.** With k
+    speculative tokens the verify step has k+1 queries per request and FA2's
+    varlen path then runs one thread block per (request, head): 24 blocks on 82
+    SMs, 57 µs per layer at 1.5k context and 1.3 ms at 16k. vLLM's Triton
+    unified attention has the same restriction (`max_seqlen_q > 1` → 2-D
+    kernel). `patches/spec-decode-attn.patch` (`VLLM_SPEC_DECODE_ATTN=1`, bf16
+    KV only) is a 170-line Triton fix.
+14. **Greedy is not deterministic across drafter configs.** The target rounds
+    differently when it verifies 5 tokens vs 1, so a different drafter changes
+    the generated text at near-ties and the 8-prompt acceptance numbers move
+    ±3%. Repeat before trusting a small difference; `drafter/README.md` has an
+    offline chain simulator that removes the noise.
+15. **A stale torch.compile cache bites anything that changes tensor shapes
+    behind vLLM's back.** The compiled graph bakes in e.g. the Marlin workspace
+    size; a new env knob that changes it must be registered in `envs.py`
+    (`patches/speed-knobs-envs.patch`) or you get `assert_size_stride ...
+    expected size 328==82` from a cached artifact.
 
 ## 262k context: the KVarN KV cache
 
