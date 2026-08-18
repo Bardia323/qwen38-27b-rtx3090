@@ -35,8 +35,15 @@ API_SERVERS=${API_SERVERS:-1}
 # needs `bash kvarn/install.sh` once): 262k context, ~2x the token capacity,
 # +0.2% perplexity, ~20% slower decode at long context and lower short-request
 # throughput (see README "262k context").
+# KV=int4pth: vLLM's built-in int4 per-token-head KV cache on the Triton
+# attention backend: 262k context with no extra install, ~1.5x slower decode /
+# 2.3x slower prefill at 100k than fp8 (main README, "per-token-head modes").
 KV=${KV:-fp8}
-if [ "$KV" = "kvarn" ]; then
+if [ "$KV" = "int4pth" ]; then
+  MAX_LEN=${MAX_LEN:-262144}
+  GPU_UTIL=${GPU_UTIL:-0.93}
+  KV_ARGS="--kv-cache-dtype int4_per_token_head --attention-backend TRITON_ATTN"
+elif [ "$KV" = "kvarn" ]; then
   MAX_LEN=${MAX_LEN:-262144}
   GPU_UTIL=${GPU_UTIL:-0.93}
   KV_ARGS="--kv-cache-dtype kvarn_k4v2_g128 --block-size 128"

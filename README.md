@@ -416,6 +416,37 @@ chunked-prefill path allocates O(context) scratch outside the memory profile
 and OOMs at 32k+ prompts on this card at 0.972 utilization, and at 128k even
 at 0.90. KVarN's prefill path is bounded and did 240k.)
 
+### The built-in per-token-head modes
+
+vLLM 0.27.1 also ships `int8_per_token_head`, `fp8_per_token_head` and
+`int4_per_token_head` (dynamic per-token, per-head scales; the int4 one with a
+rotation and asymmetric zero-points), all only in the Triton attention
+backend. Measured on the 3090 in the batch config at 0.93 utilization, same
+script for every column (`fp8_per_token_head` does not start on sm86: Triton's
+fp8 KV needs SM89+):
+
+| | fp8 (FlashInfer) | int8_per_token_head (Triton) | int4_per_token_head (Triton) | KVarN k4v2 |
+|---|---|---|---|---|
+| KV pool at 0.93 util | 164k tokens | 178k | **355k — 262k fits (1.35×)** | 302-420k |
+| perplexity (same battery) | 8.235 | 8.231 | 8.257 (+0.3%) | +0.16% |
+| needle, greedy | 100k ok | 100k ok | 100k ok, **240k ok** | 4k…240k ok |
+| prefill 1k / 16k | 1,773 / 1,601 tok/s | 1,739 / 1,187 | 1,710 / 1,194 | 1,741 / 1,569 |
+| 100k context, single stream | TTFT 100 s, 26.8 ms/token | 231 s, 40.8 ms | 220 s, 41.4 ms | 94 s, 33 ms |
+| 64 concurrent short (128/512) | 839 tok/s | 850 | 835 | 692 |
+
+Reading: `int8_per_token_head` buys nothing over fp8 here (same byte per
+element, quality already neutral) and costs the Triton backend's long-context
+speed. `int4_per_token_head` is a genuine zero-install alternative to KVarN for
+the 262k use case — it fits, passes the 240k needle, and keeps short-request
+throughput that KVarN's 2048-token blocks lose — at 2.3× the prefill time and
+1.5× the decode time at 100k, because vLLM's Triton attention is that much
+slower than FlashInfer/FlashAttention on this card at long context (the same
+backend tax the single-user mode avoids by staying on FlashAttention). If the
+Triton backend catches up, it becomes the simpler choice; today KVarN is
+faster at long context and `int4_per_token_head` is faster on many short
+requests. To try it: `--kv-cache-dtype int4_per_token_head --attention-backend
+TRITON_ATTN --max-model-len 262144` (batch/start_qwen.sh: `KV=int4pth`).
+
 ## License
 
 Apache-2.0, same as the model.
