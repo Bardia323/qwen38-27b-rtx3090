@@ -253,8 +253,7 @@ venv/bin/python build_draft_vocab.py models/Qwen3.8-27B-W4A16-AutoRound --ids dr
 # lm_head + drafter; single-user/start_qwen.sh picks it up automatically
 venv/bin/python fetch_fast_variant.py
 
-# patch vllm (all written against 0.27.1; reapply after upgrades; alphabetical
-# order matters for the two that touch envs.py)
+# patch vllm (all written against 0.27.1; reapply after upgrades)
 for p in patches/*.patch; do
   patch -p1 -d venv/lib/python3.12/site-packages/vllm < $p
 done
