@@ -8,7 +8,7 @@ API with key auth, and two ready-made configs depending on what you're doing:
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
 | aggregate, 64 concurrent (128 in / 512 out) | **876 tok/s** end-to-end, ~1,050 steady-state decode (1,025 / ~1,150 with all layers int8) | n/a (8 slots) |
-| single-stream, realistic prompts | 46 tok/s | **~114 tok/s** at default sampling, **~124 tok/s** greedy (`CTX=fast`, 64k context; 90 / 98 with `CTX=long`, 150k) |
+| single-stream, realistic prompts | 46 tok/s | **~114 tok/s** at default sampling, **118-124 tok/s** greedy (`CTX=fast`, 64k context; 95 / 100 with `CTX=long`, 150k) |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention |
 
 Both share the same install; the mode is just which launch script you run.
@@ -49,13 +49,15 @@ answers, model-default sampling):
 
 | Cohort | ninfer-3090 (MTP3, random tokens) | this repo, batch mode | this repo, single-user mode | |
 |---|---|---|---|---|
-| C1 | 70.19 tok/s | 45.4 tok/s | **~114 tok/s** (`CTX=fast`, fast variant; 83.4 with the 150k `CTX=long` config) | +62% |
-| C2 | 89.43 tok/s | 81.8 tok/s | **146.6 tok/s** | +64% |
-| C4 | 97.89 tok/s | 153.8 tok/s | **256.8 tok/s** | +162% |
-| C8 | 161.28 tok/s | 298.4 tok/s | **327.9 tok/s** | +103% |
+| C1 | 70.19 tok/s | 45.4 tok/s | **111.1 tok/s** | +58% |
+| C2 | 89.43 tok/s | 81.8 tok/s | **173.1 tok/s** | +94% |
+| C4 | 97.89 tok/s | 153.8 tok/s | **220.9 tok/s** (256.8 with `CTX=long`, k=3) | +126% |
+| C8 | 161.28 tok/s | 298.4 tok/s | **309.2 tok/s** (327.9 with `CTX=long`, k=3) | +92% |
 | C64, batch mode (128 in / 512 out) | not supported | 876 tok/s | | |
 
-Peak VRAM is comparable (23.0 GiB vs their 22.1 GiB at C8). Their engine is
+(single-user numbers: `CTX=fast` + fast variant, e2e output tok/s from
+`bench/run_benchmarks.sh single`; four drafts win up to C2, three drafts win
+from C4 up.) Peak VRAM is comparable (23.0 GiB vs their 22.1 GiB at C8). Their engine is
 good work — the gap is mostly vLLM's continuous batching plus the extra memory
 this repo's requantization frees up.
 
@@ -206,10 +208,13 @@ greedy):
 | + sampler patch, split-KV verify attention | 93 / 99 | 2.6 / 2.6 | 69% / 70% |
 | + draft vocab counted over the model's own outputs | 107 / 109 | 2.9 / 2.9 | 74% / 74% |
 | + GPTQ-int4 lm_head (calibrated) | 109 / 112 | 2.8 / 2.8 | 73% / 73% |
-| + GPTQ-int4 MTP module (**fast variant, shipped**) | **~114 / ~124** | 2.8 / 3.0 | 74% / 77% |
+| + GPTQ-int4 MTP module (**fast variant, shipped**) | **~114 / 118-124** | 2.8 / 2.9-3.0 | 74% / 77% |
 
-(Steps 4-6 are the same 8-prompt protocol; greedy is deterministic per config
-but differs *between* configs, so single runs carry ±3% on tokens/step.)
+(Steps 4-6 are the same 8-prompt protocol; greedy is deterministic for a
+given server and request order but differs between configs and even with
+prefix-cache hits, so single runs carry ±3-5% on tokens/step —
+`bench/run_benchmarks.sh single` reproduces 113.6 / 118.3 tok/s decode at C1,
+the best repeats read 115 / 124.)
 Going deeper (k=5) loses again: 106 / 105. k=4 is the knee, but on vLLM
 0.27.1's FlashInfer backend (needed for fp8 KV, i.e. for 150k context) four
 drafts crash the engine with an illegal memory access as soon as one request
@@ -387,14 +392,14 @@ fp16 recurrent state, batch defaults otherwise):
 | | fp8 KV (default) | KVarN k4v2 |
 |---|---|---|
 | KV pool, batch mode | ~205-225k tokens (150k max, ~195k ceiling) | 302-344k tokens with 64 slots, **420k with 4 slots — 262k fits with room for 1.6 such requests** |
-| KV pool, single-user mode (MTP-3) | 150k max | 200k max |
+| KV pool, single-user mode (MTP-3, `CTX=long`/`huge`) | 150k max | 200k max |
 | needle-in-a-haystack, greedy | — | correct at 4k / 16k / 30k / 100k / 240k, both depths |
 | perplexity (en/da/code, 33k tokens) | 8.223 | 8.236 (+0.16%) |
 | prefill, 1k / 16k / 100k inputs | 1,812 / 1,595 / 997 tok/s | 1,741 / 1,569 / 1,050 tok/s (same within ±5%) |
 | single stream at 100k context | TTFT 99 s, 27 ms/token | TTFT 94 s, 33 ms/token |
 | 4 × 60k-token requests, 1,024 out | only 3 fit → 256 s total, ITL 33 ms | all 4 resident → 242 s total, ITL 49 ms |
 | 64 concurrent short requests (128/512) | 876 tok/s | 692 tok/s (38 resident: 2048-token blocks cost as much per short request as fp8's 800-token block) |
-| MTP-3 single stream, real prompts | 84 / 89 tok/s | 79 / 88 tok/s |
+| MTP-3 single stream, real prompts (base variant, earlier draft vocab) | 84 / 89 tok/s | 79 / 88 tok/s |
 
 So: same VRAM, 1.6-2× the tokens, full 262k context, quality intact, prefill
 unchanged, and a speed tax of ~20% on long-context decode and more on

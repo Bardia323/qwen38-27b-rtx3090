@@ -15,19 +15,28 @@ Realistic chat prompts (8 mixed English/Danish/code tasks in
 [bench/prompts_real.jsonl](../bench/prompts_real.jsonl), 1,024-token answers),
 `vllm bench serve --dataset-name custom`, RTX 3090 at 250 W:
 
-**`CTX=fast` + fast variant (default; 64k context), C1, two repeats:**
+**`CTX=fast` + fast variant (the default; 64k context)**, as reproduced by
+`bash bench/run_benchmarks.sh single`:
 
-| | e2e | decode | tokens per step | acceptance pos 0..3 |
-|---|---|---|---|---|
-| model-default sampling (T 1.0, top-p 0.95, top-k 20) | **110.9 / 112.6 tok/s** | 113.9 / 115.1 | 2.81 / 2.85 | 74% / 50% / 34% / 24% |
-| greedy | **120.9 tok/s** | 124.4 | 3.02 | 77% / 55% / 40% / 30% |
+| Cohort | e2e, model-default sampling (T 1.0, top-p 0.95, top-k 20) | decode | e2e, greedy | decode | tokens per step | mean TTFT |
+|---|---|---|---|---|---|---|
+| C1 | **111.1 tok/s** | 113.6 | **115.3 tok/s** | 118.3 | 2.82 / 2.88 | 172 ms |
+| C2 | 173.1 tok/s | 194.0 | 175.9 tok/s | 194.9 | 2.87 / 2.83 | 278 ms |
+| C4 | 220.9 tok/s | 258.6 | 256.2 tok/s | 292.6 | 2.71 / 2.98 | 341 ms |
+| C8 | 309.2 tok/s | 379.9 | 321.9 tok/s | 404.0 | 2.71 / 2.79 | 1,006 ms |
 
-Decode throughput is 1000 / mean TPOT; e2e includes prefill and the tail.
-Quality of the fast variant: perplexity 8.095 vs 8.045 for the base
-requantization (+0.6%, en/da/code), GSM8K 96.5% (200 questions, greedy),
-identical to the base.
+Decode throughput is C × 1000 / mean TPOT; e2e includes prefill and the tail.
+Per-position draft acceptance at C1: 74% / 50% / 34% / 24% (T 1.0), 77% / 55%
+/ 40% / 30% (greedy). The best C1 repeats read 115 / 124 tok/s decode: greedy
+generation is deterministic for a given server and request order, but a
+different drafter config or a prefix-cache hit changes the text at near-ties
+and with it the acceptance, so expect ±3-5% between runs. Quality of the fast
+variant: perplexity 8.095 vs 8.045 for the base requantization (+0.6%,
+en/da/code), GSM8K 96.5% (200 questions, greedy), same as the base.
 
-**`CTX=long` (150k context, FlashInfer/fp8 KV, k=3), all cohorts:**
+**`CTX=long` (150k context, FlashInfer/fp8 KV, k=3)** with the fast variant:
+95.3 / 100.3 tok/s at C1 (T default / greedy, 2.58 / 2.61 tokens per step).
+With the base requantization and the earlier draft vocabulary, all cohorts:
 
 | Cohort | e2e, model-default sampling | decode | e2e, greedy | decode | tokens per step | mean TTFT |
 |---|---|---|---|---|---|---|
@@ -36,9 +45,11 @@ identical to the base.
 | C4 | 256.8 tok/s | 289.2 | 256.0 tok/s | 303.7 | 2.46 / 2.47 | 358 ms |
 | C8 | 327.9 tok/s | 409.0 | 364.2 tok/s | 450.5 | 2.37 / 2.50 | 1,069 ms |
 
-(measured with the earlier draft vocabulary; the new id list lifts C1 by
-~10% here too.) Batch mode does 45-46 tok/s single-stream on the same
-prompts, and overtakes this mode from C8 up.
+Four drafts win up to two concurrent users; from C4 up the three-draft config
+is ahead (rejected drafts cost more when the verify batch is bigger), so for
+a shared box `CTX=long` or `DRAFT_TOKENS=3` is the better single-user config.
+Batch mode does 45-46 tok/s single-stream on the same prompts, and overtakes
+this mode from C8 up.
 
 The same server measured on the random-token protocol used by
 [ninfer-3090](https://github.com/Don-Chad/ninfer-3090) (256 random tokens in,
@@ -99,8 +110,8 @@ bug is in the FlashInfer spec-decode path. Hence two configs:
 
 - `CTX=fast` (default): FlashAttention, bf16 KV, **~64k context**, k=4, split-KV
   verify attention → ~114 / ~124 tok/s with the fast variant
-- `CTX=long`: FlashInfer, fp8 KV, **150k context**, k=3 → ~90 / ~98 tok/s with
-  the fast variant (84 / 89 measured with the base requantization)
+- `CTX=long`: FlashInfer, fp8 KV, **150k context**, k=3 → 95 / 100 tok/s with
+  the fast variant (84 / 89 with the base requantization)
 
 k=3 passed every concurrency soak we ran (C2/C4/C8 with staggered finishes,
 100k-token prompt, 4×6k-token generations); if you see the crash anyway,
@@ -119,8 +130,8 @@ DeltaNet layers can't verify a tree.
 ## Setup
 
 Do the [common setup](../README.md#setup) first (venv, model download,
-requantization, draft head, vLLM patches; `bash verify.sh --no-server` checks
-all of it). Then:
+requantization, draft head, the fast variant via `fetch_fast_variant.py`, vLLM
+patches; `bash verify.sh --no-server` checks all of it). Then:
 
 ```bash
 bash single-user/start_qwen.sh
@@ -145,7 +156,7 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 | var | default | notes |
 |---|---|---|
 | `MODEL` | `models/Qwen3.8-27B-W4A16-AutoRound-fast` if present, else the base dir | the fast variant (`fetch_fast_variant.py`) is +15% |
-| `CTX` | `fast` | `fast`: bf16 KV / FlashAttention / 64k / 4 drafts / split-KV attention. `long`: fp8 KV / FlashInfer / 150k / 3 drafts, ~20% slower. `huge`: KVarN 4/2-bit KV / 200k / 3 drafts (needs `bash kvarn/install.sh`; main README "262k context") |
+| `CTX` | `fast` | `fast`: bf16 KV / FlashAttention / 64k / 4 drafts / split-KV attention. `long`: fp8 KV / FlashInfer / 150k / 3 drafts, ~15% slower at C1, faster from C4 up. `huge`: KVarN 4/2-bit KV / 200k / 3 drafts (needs `bash kvarn/install.sh`; main README "262k context") |
 | `DRAFT_TOKENS` | 4 (3 for `CTX=long`/`huge`) | speculative depth; 5 and 6 are slower |
 | `SPEC_ATTN` | 1 (`CTX=fast` only) | split-KV Triton attention for the verify step (`patches/spec-decode-attn.patch`); 0 = FlashAttention-2 |
 | `DRAFT_SAMPLE` | `probabilistic` | `greedy` drafts: same speed at T=0, ~15% slower at T>0 |

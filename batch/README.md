@@ -41,8 +41,12 @@ answers, model-default sampling; comparable to the
 | C4 | 153.8 tok/s | 162.7 tok/s | 343 ms |
 | C8 | 298.4 tok/s | 321.0 tok/s | 638 ms |
 
-Below ~C8, single-user mode's speculative decoding is faster; batch mode pulls
-ahead from C8 and keeps scaling to C64.
+Below ~C8, single-user mode's speculative decoding is faster (2.5× at C1 with
+the fast variant); batch mode pulls ahead from C8 and keeps scaling to C64.
+Re-measured after the single-user sampler / attention patches went in
+(2026-08-18): 882 / 635 tok/s e2e at 64 concurrent, cohorts 44.7 / 82.6 /
+165.6 / 298.5 — unchanged within noise; the patches only touch small-batch
+paths.
 
 ### Prefill
 
