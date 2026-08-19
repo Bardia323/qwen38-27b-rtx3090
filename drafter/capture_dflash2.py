@@ -112,8 +112,10 @@ def main():
         handles.append(mod.register_forward_pre_hook(pre_hook))
     # The k/v rows of qkv_proj are ALSO applied to the context rows, through the fused
     # context-KV precompute (_project_context_kv: rms_norm(context_states, hidden_norm)
-    # @ W_kv) which bypasses qkv_proj.forward. Capture that input distribution too
-    # (one shared 5120^2 Hessian, blended into the k/v Hessians by quant_dflash2.py).
+    # @ W_kv) which bypasses qkv_proj.forward. This captures that input distribution as
+    # "ctx_kv"; quant_dflash2.py blends it into the k/v Hessians when present. Measured
+    # 7% WORSE greedy acceptance than calibrating k/v on the query rows alone, so the
+    # shipped drafter is built from a Hessian file with this key removed (drafter/README.md).
     import torch.nn.functional as F
     from vllm import _custom_ops as ops
     dm = draft.model

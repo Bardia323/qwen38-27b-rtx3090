@@ -67,6 +67,8 @@ for name, w in tensors.items():
                 # k/v rows also project the context rows (fused context-KV precompute):
                 # blend the two input distributions by their row counts. GPTQ is
                 # row-independent given H, so q_proj keeps the pure query Hessian.
+                # NOTE: measured 7% worse greedy acceptance than the query-only Hessian
+                # (drafter/README.md); the shipped drafter omits "ctx_kv" from the file.
                 nq, Hc, nc = HS[LIN[base]]["n"], HS["ctx_kv"]["H"].to(dev), HS["ctx_kv"]["n"]
                 H = (nq * H + nc * Hc) / (nq + nc)
                 del Hc

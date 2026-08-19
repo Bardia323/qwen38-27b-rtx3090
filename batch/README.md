@@ -11,8 +11,12 @@ config (fp16 recurrent state, int8 activations on the MLP GEMMs):
 | workload | output tok/s (e2e) | steady-state decode | median TPOT | median TTFT |
 |---|---|---|---|---|
 | 256/256, 1 concurrent | 46 | 46 | 21.7 ms | 230 ms |
-| 128/512, 64 concurrent | **876** | ~1,050 | 61.3 ms | 3.7 s* |
-| 256/256, 64 concurrent | 642 | ~1,050 | 80.5 ms | 4.2 s* |
+| 128/512, 64 concurrent | **942** | ~1,094 | 62.2 ms | 3.0 s* |
+| 256/256, 64 concurrent | 673 | ~1,094 | 81.4 ms | 3.4 s* |
+
+(Re-measured on the current stack; two passes each, within 0.4% of one another. The 128/512
+row read 876 when this repo was first published — the difference is everything that landed
+since. The all-int8 variant below reaches ~1,197 tok/s steady-state decode.)
 
 *TTFT at saturation is queue time — the bench fires all requests at once.
 

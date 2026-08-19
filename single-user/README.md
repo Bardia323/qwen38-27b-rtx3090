@@ -56,10 +56,19 @@ this mode from C8 up.
 
 | Cohort | e2e, model-default sampling | decode | e2e, greedy | decode | tokens per step | mean TTFT |
 |---|---|---|---|---|---|---|
-| C1 | **121.6 tok/s** (repeats 121-128) | 125.0 | **133.8 tok/s** (repeats 118-134) | 138.5 | 3.18 (3.2-3.4) / 3.55 (3.1-3.6) | 165 ms |
-| C2 | 175.6 tok/s | 197.6 | 187.0 tok/s | 211.9 | 3.14 / 3.34 | 229 ms |
-| C4 | 252.5 tok/s | 281.9 | 258.9 tok/s | 300.3 | 3.27 / 3.40 | 342 ms |
-| C8 | 235.3 tok/s | 425.3 | 258.8 tok/s | 435.7 | 3.22 / 3.39 | 5,260 ms |
+| C1 | **117.8 tok/s** | 122.1 | **125.7 tok/s** | 129.9 | 3.14 / 3.34 | 170 ms |
+| C2 | 172.6 tok/s | 191.4 | 191.1 tok/s | 209.6 | 3.06 / 3.34 | 227 ms |
+| C4 | 233.8 tok/s | 286.7 | 254.1 tok/s | 309.6 | 3.25 / 3.48 | 343 ms |
+| C8 | 257.3 tok/s | 373.7 | 241.3 tok/s | 390.6 | 3.36 / 3.28 | 2,603 ms |
+
+Read the C1 row as a range, not a point. Greedy repeats *within* a server session are
+bit-identical (four in a row: 125.0-126.6 e2e, 129.2-131.9 decode, same step count to the
+token), but the greedy text flips at near-ties between sessions and acceptance moves with it:
+the same drafter and config has read 119.7, 125.7 and 133.8 tok/s e2e (3.17 / 3.34 / 3.55
+tokens per step) in different sessions. Default sampling spans 116.5-127.5 e2e for the same
+reason. If you are comparing two configurations, run both several times in the same session —
+`bench/run_benchmarks.sh single` and `bench/real_rep.sh` both print tokens per step, which is
+the stable signal.
 
 [DFlash2](https://inco.ai/blog/dflash2/) (Inco, Aug 2026;
 [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2))

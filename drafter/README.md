@@ -86,14 +86,19 @@ $V drafter/quant_dflash2.py models/Qwen3.8-27B-DFlash2 models/Qwen3.8-27B-DFlash
 
 What the measurements said (8 realistic prompts × 1,024 tokens, fast-variant target):
 
-- int4 GPTQ keeps greedy acceptance (3.65 vs 3.54 tokens per step for bf16) and loses ~5%
-  at the model's default sampling (3.2 vs 3.4): noise in q hurts the acceptance
+- int4 GPTQ keeps greedy acceptance (3.34-3.65 vs 3.54 tokens per step for bf16) and loses
+  ~5% at the model's default sampling (3.2 vs 3.4): noise in q hurts the acceptance
   *probability*, not the argmax. Per step it reads 2.7 GB less (31.4 → 28 ms with the base
   target, 26.5 ms with the fast variant), which is what turns DFlash2 from a wash into a
   win on this card.
 - `fc` in bf16 instead of int4 (+0.26 GB): no acceptance difference (3.17 vs 3.17).
-- Blending the context-KV input distribution into the k/v Hessians: equal within noise at
-  default sampling (3.31 vs 3.30), shipped because it is the right calibration.
+- Blending the context-KV input distribution into the k/v Hessians (the k/v rows are also
+  applied to the context rows by the fused precompute, so on paper this is the right
+  calibration): **7% worse** greedy acceptance, 3.34 → 3.12 tokens per step, 126 → 118 tok/s.
+  It looked equal on a single default-sampling run, which is how it nearly shipped; greedy is
+  the reproducible signal here (four repeats land within 1.5 tok/s, step counts identical).
+  `quant_dflash2.py` still supports it — pass a Hessian file containing `ctx_kv` — but the
+  shipped drafter does not use it.
 - Applying the request's top-k/top-p to the selector walk's 16-candidate proposal (cached
   truncated, so the verify stays lossless — the DFlash2 analogue of the MTP draft
   truncation): +2%, inside the noise; on by default (`VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` off).

@@ -7,8 +7,8 @@ API with key auth, and two ready-made configs depending on what you're doing:
 | | [batch/](batch/) | [single-user/](single-user/) |
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
-| aggregate, 64 concurrent (128 in / 512 out) | **876 tok/s** end-to-end, ~1,050 steady-state decode (1,025 / ~1,150 with all layers int8) | n/a (8 slots) |
-| single-stream, realistic prompts | 46 tok/s | **~114 tok/s** at default sampling, **118-124 tok/s** greedy (`CTX=fast`, 64k context; 95 / 100 with `CTX=long`, 150k); **121-128 / ~134 tok/s** with the DFlash2 block drafter (`SPEC=dflash2`) |
+| aggregate, 64 concurrent (128 in / 512 out) | **942 tok/s** end-to-end, ~1,094 steady-state decode (~1,197 with all layers int8) | n/a (8 slots) |
+| single-stream, realistic prompts | 46 tok/s | **~114 tok/s** at default sampling, **118-124 tok/s** greedy (`CTX=fast`, 64k context; 95 / 100 with `CTX=long`, 150k); **117-127 / 120-134 tok/s** with the DFlash2 block drafter (`SPEC=dflash2`) |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) |
 
 Both share the same install; the mode is just which launch script you run.
@@ -69,7 +69,7 @@ answers, model-default sampling):
 | C2 | 89.43 tok/s | 81.8 tok/s | **173.1 tok/s** | +94% |
 | C4 | 97.89 tok/s | 153.8 tok/s | **220.9 tok/s** (256.8 with `CTX=long`, k=3) | +126% |
 | C8 | 161.28 tok/s | 298.4 tok/s | **309.2 tok/s** (327.9 with `CTX=long`, k=3) | +92% |
-| C64, batch mode (128 in / 512 out) | not supported | 876 tok/s | | |
+| C64, batch mode (128 in / 512 out) | not supported | 942 tok/s | | |
 
 (single-user numbers: `CTX=fast` + fast variant, e2e output tok/s from
 `bench/run_benchmarks.sh single`; four drafts win up to C2, three drafts win
@@ -219,8 +219,8 @@ serve` random dataset:
 | W4A16 AutoRound body (as published) + fp8 KV | int4 Marlin kernels, 66.7k-token pool | 370 (48 conc, 256/256) | — |
 | + lm_head / embed_tokens int8 | 2.6 GB of cache pages back | 516 | ~585 (37 requests resident) |
 | + fp16 recurrent state | 64 requests resident, half the state traffic | 707 | ~830 |
-| + int8 activations, MLP (default) | int8 tensor cores on 74% of the FLOPs | 876 | ~1,050 |
-| + int8 activations, everything | | 1,025 | ~1,150 |
+| + int8 activations, MLP (default) | int8 tensor cores on 74% of the FLOPs | 942 | ~1,094 |
+| + int8 activations, everything | | not re-measured | ~1,197 |
 
 And single-stream on realistic prompts (single-user mode, T = model default /
 greedy):
@@ -236,7 +236,8 @@ greedy):
 | + draft vocab counted over the model's own outputs | 107 / 109 | 2.9 / 2.9 | 74% / 74% |
 | + GPTQ-int4 lm_head (calibrated) | 109 / 112 | 2.8 / 2.8 | 73% / 73% |
 | + GPTQ-int4 MTP module (**fast variant, shipped**) | **~114 / 118-124** | 2.8 / 2.9-3.0 | 74% / 77% |
-| DFlash2 block drafter instead of MTP (`SPEC=dflash2`, int4-requantized) | **121-128 / 118-134** | 3.2-3.4 / 3.1-3.6 | ~75% / ~77% |
+| DFlash2 block drafter instead of MTP (`SPEC=dflash2`, int4-requantized) | **118 / 126** | 3.14 / 3.34 | ~75% / ~78% |
+| + drafting from the context (`LOOKUP=1`, on by default) | up to **131** on quoting/listing work | 3.3-4.65 | |
 
 (Steps 4-6 are the same 8-prompt protocol; greedy is deterministic for a
 given server and request order but differs between configs and even with
@@ -291,10 +292,11 @@ size. What it took to make it pay on a 24 GB card, in order:
    3.4 tokens per step) and nothing at greedy; keeping `fc` in bf16 did not
    recover it.
 3. **Result** (`bench/run_benchmarks.sh single`, fast variant target): 26.5 ms
-   per step vs MTP's 24.8, 3.2-3.4 tokens per step vs 2.8-2.9 → **121-128 tok/s
-   at default sampling and 118-134 greedy at C1** (MTP: 111-115 / 115-124), and
-   a higher decode rate at C2-C8. Same output distribution by construction
-   (perplexity 8.094, GSM8K 96.0%).
+   per step vs MTP's 24.8, 3.14-3.34 tokens per step vs 2.8-2.9 → **117.8 tok/s
+   at default sampling and 125.7 greedy at C1** (MTP: 111-115 / 115-124), with
+   the best runs of this drafter reading 133.8 / 138.5, and a higher decode rate
+   at C2-C8. Same output distribution by construction (perplexity 8.094,
+   GSM8K 96.0-96.5%).
 
 4. **Getting the context back to 64k** took a second patch
    (`patches/hybrid-kv-groups-v2-cudagraph.patch`), because the first version of
