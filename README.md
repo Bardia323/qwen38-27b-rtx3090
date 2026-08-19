@@ -44,33 +44,25 @@ Full tables per mode in [batch/README.md](batch/README.md) and
 
 ### vs. ninfer-3090
 
-[ninfer-3090](https://github.com/Don-Chad/ninfer-3090) publishes cohort
-benchmarks for this exact model on this exact card. Their protocol is C
-requests of random tokens, 1,024 output tokens each. Random-token prompts turn
-out to be a bad yardstick for speculative decoding — the model's continuation
-of noise is either extremely repetitive (drafts accepted 80%+ of the time,
-we've measured 151 tok/s single-stream that way) or full of rare tokens (near
-zero acceptance) depending on the sample — so we report both modes on
-realistic chat prompts instead (8 mixed English/Danish/code tasks, 1,024-token
-answers, model-default sampling):
+[ninfer-3090](https://github.com/Don-Chad/ninfer-3090) publishes cohort benchmarks
+for this model on this card, using C concurrent requests of random tokens. Random
+tokens are a bad yardstick for speculative decoding — acceptance swings between 80%
+and near zero with the sample — so ours are 8 realistic chat prompts (English,
+Danish, code), 1,024-token answers, model-default sampling:
 
-| Cohort | ninfer-3090 (MTP3, random tokens) | this repo, batch mode | this repo, single-user mode | |
+| Cohort | ninfer-3090 (MTP3, random tokens) | this repo, batch | single-user, MTP | single-user, DFlash2 |
 |---|---|---|---|---|
-| C1 | 70.19 tok/s | 45.4 tok/s | **111.1 tok/s** | +58% |
-| C2 | 89.43 tok/s | 81.8 tok/s | **173.1 tok/s** | +94% |
-| C4 | 97.89 tok/s | 153.8 tok/s | **220.9 tok/s** (256.8 with `CTX=long`, k=3) | +126% |
-| C8 | 161.28 tok/s | 298.4 tok/s | **309.2 tok/s** (327.9 with `CTX=long`, k=3) | +92% |
-| C64, batch mode (128 in / 512 out) | not supported | 942 tok/s | | |
+| C1 | 70.19 tok/s | 45.4 | 111.1 | **117.8** |
+| C2 | 89.43 tok/s | 81.8 | **173.1** | 172.6 |
+| C4 | 97.89 tok/s | 153.8 | 220.9 (256.8 with `CTX=long`) | **233.8** |
+| C8 | 161.28 tok/s | 298.4 | **309.2** (327.9 with `CTX=long`) | 257.3 |
+| C64 (128 in / 512 out) | not supported | **942** | — | — |
 
-With the DFlash2 drafter (`SPEC=dflash2`, the fastest single-user config for a
-handful of users): 117.8 / 172.6 / 233.8 / 257.3 tok/s at C1 / C2 / C4 / C8, and
-125.7 / 191.1 / 254.1 / 241.3 greedy.
-
-(single-user numbers: `CTX=fast` + fast variant, e2e output tok/s from
-`bench/run_benchmarks.sh single`; four drafts win up to C2, three drafts win
-from C4 up.) Peak VRAM is comparable (23.0 GiB vs their 22.1 GiB at C8). Their engine is
-good work — the gap is mostly vLLM's continuous batching plus the extra memory
-this repo's requantization frees up.
+End-to-end output tok/s from `bench/run_benchmarks.sh`; greedy instead of default
+sampling reads 125.7 / 191.1 / 254.1 / 241.3 for DFlash2. The C64 and DFlash2
+columns are from the current stack, the other two from earlier runs. Peak VRAM is
+comparable to theirs (23.0 vs 22.1 GiB at C8) — the gap is mostly vLLM's continuous
+batching plus the memory this repo's requantization frees up.
 
 ### Quality
 
