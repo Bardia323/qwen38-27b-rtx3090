@@ -240,7 +240,7 @@ bash bench/run_benchmarks.sh single             # reproduces the tables above
 ```
 
 Or in Docker (image build, model prep and the same knobs via `.env` — see the
-[Docker section](../README.md#docker)):
+[docs/docker.md](../docs/docker.md)):
 
 ```bash
 docker compose --profile single up -d
@@ -264,7 +264,7 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 | var | default | notes |
 |---|---|---|
 | `MODEL` | `models/Qwen3.8-27B-W4A16-AutoRound-fast` if present, else the base dir | the fast variant (`fetch_fast_variant.py`) is +15% |
-| `CTX` | `fast` | `fast`: bf16 KV / FlashAttention / 64k / 4 drafts / split-KV attention. `long`: fp8 KV / FlashInfer / 150k / 3 drafts, ~15% slower at C1, faster from C4 up. `huge`: KVarN 4/2-bit KV / 200k / 3 drafts (needs `bash kvarn/install.sh`; main README "262k context") |
+| `CTX` | `fast` | `fast`: bf16 KV / FlashAttention / 64k / 4 drafts / split-KV attention. `long`: fp8 KV / FlashInfer / 150k / 3 drafts, ~15% slower at C1, faster from C4 up. `huge`: KVarN 4/2-bit KV / 200k / 3 drafts (needs `bash kvarn/install.sh`; docs/long-context.md) |
 | `PREFIX_CACHE` | 0 | 1 = reuse a shared prompt prefix across requests (`--enable-prefix-caching --mamba-cache-mode align`): 20x faster follow-up turns, ~16% smaller KV pool |
 | `LOOKUP` | 1 (`SPEC=dflash2`) | draft from the request's own context when it repeats itself (`patches/dflash2-lookup-drafting.patch`); `VLLM_DFLASH2_LOOKUP_NMIN` (6) sets the shortest suffix that may override the drafter |
 | `SPEC` | `mtp` | `dflash2`: the DFlash2 block drafter (`fetch_dflash2.py`; `CTX=fast` only, V2 model runner, 64k). `DRAFT` overrides the drafter dir, `DFLASH_TOKENS` (7) the block, `DFLASH_MAX_LEN` (65536) the context, `KV_MEM` (5583457484 = 5.2 GiB) pins the KV pool — set `KV_MEM=` to size it from `GPU_UTIL` instead; `VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` disables the proposal truncation, `VLLM_DFLASH2_TORCH_TOPK=1` avoids the FlashInfer top-k JIT |
@@ -273,7 +273,7 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 | `DRAFT_SAMPLE` | `probabilistic` | `greedy` drafts: same speed at T=0, ~15% slower at T>0 |
 | `MAX_SEQS` | 8 | plenty for a few users; each request holds k+1 recurrent-state slots |
 | `MAX_LEN` | 65536 (`fast`) / 150000 (`long`) | 150k needs `GPU_UTIL` 0.93 |
-| `GPU_UTIL` | 0.93 | soak-tested with a 100k prompt and 4×6k-token generations; batch mode's 0.972 OOMs in the MTP path (main README, gotcha 4) |
+| `GPU_UTIL` | 0.93 | soak-tested with a 100k prompt and 4×6k-token generations; batch mode's 0.972 OOMs in the MTP path (docs/gotchas.md, gotcha 4) |
 | `MTP_DRAFT_VOCAB` | 1 | set 0 to draft with the full lm_head (more acceptance, slower per draft) |
 | `PORT` | 18020 | |
 

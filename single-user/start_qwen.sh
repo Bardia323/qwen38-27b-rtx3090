@@ -47,13 +47,13 @@ MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound}
 PORT=${PORT:-18020}
 MAX_SEQS=${MAX_SEQS:-8}
 # 0.93 here, NOT batch mode's 0.972: the DeltaNet workspace in the MTP decode
-# path allocates beyond the startup memory profile (main README, gotcha 4).
+# path allocates beyond the startup memory profile (docs/gotchas.md, gotcha 4).
 GPU_UTIL=${GPU_UTIL:-0.93}
 API_SERVERS=${API_SERVERS:-1}
 # CTX=long (default): fp8 KV via FlashInfer, 150k context, 3 drafts.
 # CTX=fast: bf16 KV via FlashAttention, ~64k context, 4 drafts (~+7%).
 # CTX=huge: KVarN 4/2-bit KV cache (kvarn/ in this repo, run kvarn/install.sh
-#           once), 200k context with MTP, ~5% slower (see README "262k context").
+#           once), 200k context with MTP, ~5% slower (see docs/long-context.md).
 CTX=${CTX:-fast}
 # SPEC=mtp (default): Qwen's own MTP head, k drafts chained (the numbers above).
 # SPEC=dflash2: the DFlash2 block drafter (incoai/Qwen3.8-27B-DFlash2, requantized

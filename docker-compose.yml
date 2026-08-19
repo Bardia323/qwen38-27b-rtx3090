@@ -1,4 +1,4 @@
-# Qwen3.8-27B on one RTX 3090, containerized. See README "Docker".
+# Qwen3.8-27B on one RTX 3090, containerized. See docs/docker.md.
 #
 #   docker compose --profile single up -d     # low latency: MTP speculative decoding
 #   docker compose --profile batch  up -d     # throughput

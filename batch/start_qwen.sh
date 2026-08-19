@@ -34,10 +34,10 @@ API_SERVERS=${API_SERVERS:-1}
 # KV=kvarn: the KVarN 4-bit-key / 2-bit-value cache (kvarn/ in this repo,
 # needs `bash kvarn/install.sh` once): 262k context, ~2x the token capacity,
 # +0.2% perplexity, ~20% slower decode at long context and lower short-request
-# throughput (see README "262k context").
+# throughput (see docs/long-context.md).
 # KV=int4pth: vLLM's built-in int4 per-token-head KV cache on the Triton
 # attention backend: 262k context with no extra install, ~1.5x slower decode /
-# 2.3x slower prefill at 100k than fp8 (main README, "per-token-head modes").
+# 2.3x slower prefill at 100k than fp8 (docs/long-context.md).
 KV=${KV:-fp8}
 if [ "$KV" = "int4pth" ]; then
   MAX_LEN=${MAX_LEN:-262144}

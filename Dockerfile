@@ -8,7 +8,7 @@
 # The compiled kernels and the torch.compile cache live in the /cache volume, so
 # that only happens once.
 #
-#   docker compose --profile single up -d      (see README "Docker")
+#   docker compose --profile single up -d      (see docs/docker.md)
 FROM nvidia/cuda:13.0.1-base-ubuntu24.04
 
 ENV DEBIAN_FRONTEND=noninteractive PIP_NO_CACHE_DIR=1 PYTHONUNBUFFERED=1

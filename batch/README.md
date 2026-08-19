@@ -16,7 +16,10 @@ config (fp16 recurrent state, int8 activations on the MLP GEMMs):
 
 (Re-measured on the current stack; two passes each, within 0.4% of one another. The 128/512
 row read 876 when this repo was first published — the difference is everything that landed
-since. The all-int8 variant below reaches ~1,197 tok/s steady-state decode.)
+since. `INT8_LAYERS=.` — int8 activations on every linear, not just the MLP — reaches
+**1,042 tok/s** e2e and ~1,222 steady-state decode, but needs `GPU_UTIL=0.95`: it OOMs inside
+the GDN chunk kernel at the 0.972 default. Quality cost of that row: +3.7% perplexity,
+[docs/quality.md](../docs/quality.md).)
 
 *TTFT at saturation is queue time — the bench fires all requests at once.
 
@@ -32,7 +35,7 @@ includes everybody's prefill and the ramp. Older configs, same protocol:
 | int8 activations, MLP (default) | 876 | 642 | ~1,050 |
 | int8 activations, all linears (`INT8_LAYERS=.`) | 1,025 | 752 | ~1,150 |
 
-Quality of each row is in the [main README](../README.md#quality).
+Quality of each row is in the [quality tables](../docs/quality.md).
 
 Cohort protocol on realistic prompts (C concurrent chat requests, 1,024-token
 answers, model-default sampling; comparable to the
@@ -113,7 +116,7 @@ bash batch/start_qwen.sh
 ```
 
 Or in Docker (image build, model prep and the same knobs via `.env` — see the
-[Docker section](../README.md#docker)):
+[docs/docker.md](../docs/docker.md)):
 
 ```bash
 docker compose --profile batch up -d

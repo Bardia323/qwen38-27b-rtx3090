@@ -43,7 +43,7 @@ Port notes, for whoever bumps vLLM next:
 - Not ported: the MLA path, `TQSlidingWindowSpec` (no sliding-window layers
   here), the Gemma-4 config hunk.
 
-Measured on the 3090 (details in the main README): 262k context fits
+Measured on the 3090 (details in [docs/long-context.md](../docs/long-context.md)): 262k context fits
 (420k-token pool at 4 slots vs ~200k with fp8), needle-in-a-haystack correct
 at 4k…240k, perplexity +0.16%, decode ~20% slower than fp8 at 100k context,
 MTP works, short-request throughput lower (2048-token blocks make each
