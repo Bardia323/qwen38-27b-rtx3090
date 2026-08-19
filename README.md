@@ -35,7 +35,23 @@ at 100k. A 100k prompt costs ~100 s of TTFT (~130 s in single-user mode), and
 concurrent prompts queue linearly behind each other. Full matrix in
 [batch/README.md](batch/README.md#prefill).
 
-### vs. ninfer-3090
+## Quick start
+
+Docker (recommended — image build, model download and requantization, then
+the server; the API is OpenAI-compatible on port 18020):
+
+```bash
+git clone https://github.com/syv-ai/qwen38-27b-rtx3090 && cd qwen38-27b-rtx3090
+echo "VLLM_API_KEY=$(openssl rand -hex 24)" > .env
+docker compose --profile single up -d      # one or a few users; or --profile batch
+```
+
+Or by hand in a venv (same steps: model download, requantization, vLLM
+patches, `verify.sh`) — see [Setup](#setup). Knobs, numbers and gotchas:
+[Setup](#setup), [Docker](#docker), [batch/](batch/), [single-user/](single-user/),
+[Gotchas](#gotchas).
+
+## vs. ninfer-3090
 
 [ninfer-3090](https://github.com/Don-Chad/ninfer-3090) publishes cohort
 benchmarks for this exact model on this exact card. Their protocol is C
