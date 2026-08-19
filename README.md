@@ -299,6 +299,46 @@ tables in this README against the running server (`--prefill` and `--long`
 add the prefill matrix and the long-context rows), and
 `python bench/quality_battery.py <tag>` the perplexity / GSM8K rows.
 
+### WSL2 notes
+
+An independent WSL2 reproduction at `e81fa39` used kernel
+`6.6.87.2-microsoft-standard-WSL2`, Ubuntu 24.04, NVIDIA driver 591.86,
+Docker Engine 29.2.0 / Compose 5.0.2, and one RTX 3090 exposed to the
+container. All six launch configurations passed authenticated API/chat and
+GPU-isolation checks with zero failed benchmark requests. The full failure
+signatures and earlier five-profile matrix are in [issue #1](../../issues/1).
+
+| profile | measured cache | representative output throughput |
+|---|---:|---:|
+| `single-long` | 159,326 tokens, fixed as described below | 95.39 tok/s greedy, C1 |
+| `single-fast` | 93,791 tokens | 114.17 tok/s greedy, C1 |
+| `single-huge` | 320,000 cold / 327,272 warm | 79.84 / 81.66 tok/s, C1 sampled |
+| `batch` | 201,832 tokens | 1,041.99 / 1,038.25 tok/s, C64 |
+| `batch`, `KV=int4pth` | 437,414 tokens | 1,043.84 / 1,044.06 tok/s, C64 |
+| `batch`, `KV=kvarn` | 334,183 cold / 350,192 warm | 843.72 / 852.42 tok/s, C64 |
+
+Two WSL-specific memory behaviors are worth accounting for:
+
+1. **The ordinary batch default may fail vLLM's startup free-memory gate.**
+   On an otherwise clean card, WSL reported 22.75/24.0 GiB free, less than
+   the 23.33 GiB requested by `GPU_UTIL=0.972`. Launching with
+   `GPU_UTIL=0.93 bash batch/start_qwen.sh` retained a 201,832-token FP8
+   pool, preserving the 150k context contract and expected C64 throughput.
+   Keep 0.972 as the tuned native-Linux default; 0.93 is a WSL fallback.
+2. **Cold and cached starts can profile different activation peaks.** A warm
+   start may turn the difference into extra KV pages and leave less transient
+   headroom than the cold start. For a deterministic service, compile once
+   from a cold cache, record vLLM's conservative
+   `Replace gpu_memory_utilization config with --kv-cache-memory=...`
+   recommendation, verify that the resulting token pool exceeds
+   `MAX_LEN`, and pass that machine/profile-specific byte value through
+   `EXTRA_ARGS` on later starts. Stress concurrent prefill or
+   `prompt_logprobs` before promoting it. Do not copy a byte value from a
+   different card or profile.
+
+The separate Marlin-repack allocator observation from issue #1 is not changed
+by this documentation PR; it may belong in vLLM rather than this recipe.
+
 ## Gotchas
 
 Things that each cost us hours, in rough order of pain:
