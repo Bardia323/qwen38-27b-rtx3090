@@ -48,6 +48,7 @@ PORT=${PORT:-18020}
 MAX_SEQS=${MAX_SEQS:-8}
 # 0.93 here, NOT batch mode's 0.972: the DeltaNet workspace in the MTP decode
 # path allocates beyond the startup memory profile (main README, gotcha 4).
+USER_GPU_UTIL=$GPU_UTIL
 GPU_UTIL=${GPU_UTIL:-0.93}
 API_SERVERS=${API_SERVERS:-1}
 # CTX=long (default): fp8 KV via FlashInfer, 150k context, 3 drafts.
@@ -55,6 +56,13 @@ API_SERVERS=${API_SERVERS:-1}
 # CTX=huge: KVarN 4/2-bit KV cache (kvarn/ in this repo, run kvarn/install.sh
 #           once), 200k context with MTP, ~5% slower (see README "262k context").
 CTX=${CTX:-fast}
+# SPEC=mtp (default): Qwen's own MTP head, k drafts chained (the numbers above).
+# SPEC=dflash2: the DFlash2 block drafter (incoai/Qwen3.8-27B-DFlash2, requantized
+#   to W4A16 by this repo: fetch_dflash2.py), 7 drafts in ONE non-autoregressive
+#   pass + a path selector; runs on vLLM's V2 model runner
+#   (patches/dflash2-backport.patch). CTX=fast only (bf16 KV / FLASH_ATTN; the
+#   drafter's block attention is non-causal); see README "DFlash2".
+SPEC=${SPEC:-mtp}
 # SPEC_ATTN=1: split-KV Triton attention for the multi-query verify step
 # (patches/spec-decode-attn.patch); bf16 KV only, so CTX=fast only.
 if [ "$CTX" = "fast" ]; then
@@ -71,6 +79,34 @@ else
   MAX_LEN=${MAX_LEN:-150000}
   DRAFT_TOKENS=${DRAFT_TOKENS:-3}
   ATTN_ARGS="--kv-cache-dtype fp8"
+fi
+if [ "$SPEC" = "dflash2" ]; then
+  if [ "$CTX" != "fast" ]; then
+    echo "SPEC=dflash2 is CTX=fast only (bf16 KV, FLASH_ATTN); CTX=$CTX keeps SPEC=mtp" >&2
+    SPEC=mtp
+  fi
+fi
+if [ "$SPEC" = "dflash2" ]; then
+  if [ -z "$DRAFT" ]; then
+    for d in Qwen3.8-27B-DFlash2-W4A16 Qwen3.8-27B-DFlash2; do
+      [ -f "$REPO/models/$d/model.safetensors" ] && DRAFT=$REPO/models/$d && break
+    done
+  fi
+  [ -n "$DRAFT" ] || { echo "SPEC=dflash2 needs the drafter: venv/bin/python fetch_dflash2.py" >&2; exit 1; }
+  # DFLASH_TOKENS (not DRAFT_TOKENS): 7 = the block size the drafter was trained with (1 + 7)
+  DRAFT_TOKENS=${DFLASH_TOKENS:-7}
+  SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":$DRAFT_TOKENS}"
+  # The V2 model runner captures decode graphs in multiples of k+1 tokens: cover MAX_SEQS requests.
+  CG=${CG:-$((MAX_SEQS * (DRAFT_TOKENS + 1)))}
+  # Context and memory: the drafter's 5 sliding-window layers get a full-length KV group
+  # from the 0.27.1 hybrid allocator, each request holds 1+7 recurrent-state slots, and
+  # the V2 runner does not count its CUDA graphs (~1.2 GiB) when sizing the KV pool, so
+  # this mode runs at 0.90 and 40k context (64k with SPEC=mtp). Measured: 47k-token pool.
+  MAX_LEN=${DFLASH_MAX_LEN:-40960}
+  [ -n "$USER_GPU_UTIL" ] || GPU_UTIL=${DFLASH_GPU_UTIL:-0.90}
+else
+  SPEC_CFG="{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}"
+  CG=${CG:-32}
 fi
 
 export PATH="$REPO/venv/bin:$PATH"
@@ -93,7 +129,7 @@ exec venv/bin/vllm serve "$MODEL" \
   --mamba-ssm-cache-dtype float16 \
   --async-scheduling \
   --max-num-batched-tokens 2048 \
-  --speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}" \
-  --compilation-config "{\"max_cudagraph_capture_size\":32,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \
+  --speculative-config "$SPEC_CFG" \
+  --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \
   --reasoning-parser qwen3 \
   ${EXTRA_ARGS}

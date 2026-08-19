@@ -51,6 +51,50 @@ a shared box `CTX=long` or `DRAFT_TOKENS=3` is the better single-user config.
 Batch mode does 45-46 tok/s single-stream on the same prompts, and overtakes
 this mode from C8 up.
 
+**`SPEC=dflash2` — the DFlash2 block drafter (40k context)**, same protocol,
+`CTX=fast` + fast variant, W4A16 drafter from `fetch_dflash2.py`:
+
+| Cohort | e2e, model-default sampling | decode | e2e, greedy | decode | tokens per step | mean TTFT |
+|---|---|---|---|---|---|---|
+| C1 | **121.6 tok/s** (repeats 121-128) | 125.0 | **133.8 tok/s** (repeats 118-134) | 138.5 | 3.18 (3.2-3.4) / 3.55 (3.1-3.6) | 165 ms |
+| C2 | 175.6 tok/s | 197.6 | 187.0 tok/s | 211.9 | 3.14 / 3.34 | 229 ms |
+| C4 | 252.5 tok/s | 281.9 | 258.9 tok/s | 300.3 | 3.27 / 3.40 | 342 ms |
+| C8 | 235.3 tok/s | 425.3 | 258.8 tok/s | 435.7 | 3.22 / 3.39 | 5,260 ms |
+
+[DFlash2](https://inco.ai/blog/dflash2/) (Inco, Aug 2026;
+[incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2))
+is a 5-layer block drafter that predicts 7 tokens in one non-autoregressive
+pass from the target's layer 5/19/33/47/61 hidden states, plus a path selector
+over 16 candidates per slot. It runs on vLLM's V2 model runner through
+`patches/dflash2-backport.patch` (vLLM PR #52816 backported to 0.27.1) with the
+drafter requantized to W4A16 by this repo (1.19 GB instead of 3.85 GB —
+`drafter/README.md`): per step it reads ~1 GB of drafter plus an 8-token verify,
+26.5 ms vs MTP's 24.8, and accepts 3.2-3.4 tokens per step at default sampling
+(MTP: 2.8-2.9), so **+10% at C1 at default sampling, +15% greedy**, and the
+decode rate is higher at every cohort. Where it is *not* the better choice:
+
+- **C8 and up**: every request reserves 1+k = 8 recurrent-state slots (≈0.7 GB,
+  vs 5 slots / 0.44 GB for MTP k=4), so only 5-6 long generations are resident
+  and the rest queue (the 5 s TTFT above, `Running: 5 reqs, Waiting: 3`). MTP
+  reads 309 tok/s e2e at C8, DFlash2 235. One GPU, 1-4 users: DFlash2; more:
+  MTP or batch mode.
+- **Long contexts**: the drafter attends to a 2,048-token window. On a 12k /
+  36k-token summarization prompt (chat API) it accepts 2.3-2.6 tokens per step
+  against MTP's 2.6-3.0, and the drafter's own prefill adds ~15% to TTFT; end to
+  end the two are within 5-10% there, MTP ahead. Up to ~8k tokens of context,
+  which is most single-user traffic, DFlash2 wins.
+- **Context length**: 40k (`DFLASH_MAX_LEN`) at `GPU_UTIL` 0.90, not 64k: the
+  drafter's sliding-window layers get a full-length KV group from 0.27.1's
+  hybrid allocator (+25% padding), the extra state slots, and the V2 runner does
+  not count its ~1.2 GiB of CUDA graphs when sizing the KV pool (measured pool:
+  45,383 tokens, 1.11× at 40,960). `CTX=long` / `CTX=huge` stay MTP (the drafter
+  needs FLASH_ATTN/bf16 KV; the script falls back with a message).
+- The V2 runner rejects the `thinking_token_budget` request parameter (HTTP
+  400); everything else we use (logprobs, prompt_logprobs, n, stop, seeds,
+  structured outputs, penalties, streaming, thinking) was checked
+  (`bench/api_smoke.py`-style run, 12/12). Quality unchanged by construction
+  (speculation is exact): perplexity 8.094, GSM8K 96.0% on the fast variant.
+
 The same server measured on the random-token protocol used by
 [ninfer-3090](https://github.com/Don-Chad/ninfer-3090) (256 random tokens in,
 1,024 out) reads anywhere from 35 to 151 tok/s depending on what the model
@@ -134,8 +178,10 @@ requantization, draft head, the fast variant via `fetch_fast_variant.py`, vLLM
 patches; `bash verify.sh --no-server` checks all of it). Then:
 
 ```bash
-bash single-user/start_qwen.sh
-bash bench/run_benchmarks.sh single    # reproduces the tables above
+bash single-user/start_qwen.sh                  # MTP (64k context)
+venv/bin/python fetch_dflash2.py                # once: the 1.2 GB W4A16 DFlash2 drafter
+SPEC=dflash2 bash single-user/start_qwen.sh     # DFlash2 (40k context, +10-15% at C1)
+bash bench/run_benchmarks.sh single             # reproduces the tables above
 ```
 
 Or in Docker (image build, model prep and the same knobs via `.env` — see the
@@ -164,6 +210,7 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 |---|---|---|
 | `MODEL` | `models/Qwen3.8-27B-W4A16-AutoRound-fast` if present, else the base dir | the fast variant (`fetch_fast_variant.py`) is +15% |
 | `CTX` | `fast` | `fast`: bf16 KV / FlashAttention / 64k / 4 drafts / split-KV attention. `long`: fp8 KV / FlashInfer / 150k / 3 drafts, ~15% slower at C1, faster from C4 up. `huge`: KVarN 4/2-bit KV / 200k / 3 drafts (needs `bash kvarn/install.sh`; main README "262k context") |
+| `SPEC` | `mtp` | `dflash2`: the DFlash2 block drafter (`fetch_dflash2.py`; `CTX=fast` only, V2 model runner). `DRAFT` overrides the drafter dir, `DFLASH_TOKENS` (7) the block, `DFLASH_MAX_LEN` (40960) and `DFLASH_GPU_UTIL` (0.90) its memory defaults; `VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` disables the proposal truncation, `VLLM_DFLASH2_TORCH_TOPK=1` avoids the FlashInfer top-k JIT |
 | `DRAFT_TOKENS` | 4 (3 for `CTX=long`/`huge`) | speculative depth; 5 and 6 are slower |
 | `SPEC_ATTN` | 1 (`CTX=fast` only) | split-KV Triton attention for the verify step (`patches/spec-decode-attn.patch`); 0 = FlashAttention-2 |
 | `DRAFT_SAMPLE` | `probabilistic` | `greedy` drafts: same speed at T=0, ~15% slower at T>0 |

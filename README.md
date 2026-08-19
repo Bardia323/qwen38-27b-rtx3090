@@ -8,8 +8,8 @@ API with key auth, and two ready-made configs depending on what you're doing:
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
 | aggregate, 64 concurrent (128 in / 512 out) | **876 tok/s** end-to-end, ~1,050 steady-state decode (1,025 / ~1,150 with all layers int8) | n/a (8 slots) |
-| single-stream, realistic prompts | 46 tok/s | **~114 tok/s** at default sampling, **118-124 tok/s** greedy (`CTX=fast`, 64k context; 95 / 100 with `CTX=long`, 150k) |
-| trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention |
+| single-stream, realistic prompts | 46 tok/s | **~114 tok/s** at default sampling, **118-124 tok/s** greedy (`CTX=fast`, 64k context; 95 / 100 with `CTX=long`, 150k); **121-128 / ~134 tok/s** with the DFlash2 block drafter (`SPEC=dflash2`, 40k context) |
+| trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) |
 
 Both share the same install; the mode is just which launch script you run.
 The crossover is around 8 concurrent users: below that, speculation wins;
@@ -225,6 +225,7 @@ greedy):
 | + draft vocab counted over the model's own outputs | 107 / 109 | 2.9 / 2.9 | 74% / 74% |
 | + GPTQ-int4 lm_head (calibrated) | 109 / 112 | 2.8 / 2.8 | 73% / 73% |
 | + GPTQ-int4 MTP module (**fast variant, shipped**) | **~114 / 118-124** | 2.8 / 2.9-3.0 | 74% / 77% |
+| DFlash2 block drafter instead of MTP (`SPEC=dflash2`, int4-requantized, 40k ctx) | **121-128 / 118-134** | 3.2-3.4 / 3.1-3.6 | ~75% / ~77% |
 
 (Steps 4-6 are the same 8-prompt protocol; greedy is deterministic for a
 given server and request order but differs between configs and even with
@@ -245,6 +246,54 @@ tokens unchanged; `drafter/README.md`), and retuning Marlin's tile
 configuration for M ≤ 16 on sm86 (`marlin-tune/`: 3-7% per GEMM in isolation,
 nothing measurable end to end — the remaining gap to peak bandwidth is the
 memory system's ramp on 16-92 MB reads, not the kernel).
+
+### DFlash2 (`SPEC=dflash2`)
+
+The one lever left after all of the above is acceptance, and Qwen's MTP head
+is a single-layer chain drafter at its ceiling. [DFlash2](https://inco.ai/blog/dflash2/)
+(Inco, Aug 2026) is a different drafter for this exact target:
+5 Qwen3-style layers that predict the whole 7-token block in one
+non-autoregressive pass from the target's layer 5/19/33/47/61 hidden states,
+plus a selector that walks a coherent path through 16 candidates per slot. On
+the bf16 model it reports 4.80 tokens per step vs 4.28 for MTP at the same block
+size. What it took to make it pay on a 24 GB card, in order:
+
+1. **Backport.** vLLM's support is [PR #52816](https://github.com/vllm-project/vllm/pull/52816)
+   on main, on the V2 model runner. `patches/dflash2-backport.patch` carries it to
+   0.27.1 plus the pieces of main it silently relies on (sentinel `-1` sample
+   rows, sliding-window null-block guards, K draft slots, NaN guards) and one
+   semantic fix: 0.27.1 caches temperature-*applied* draft logits, main caches
+   raw ones, and the PR's selector cached raw scores — on 0.27.1 that would have
+   verified against the wrong q for 0 < T ≠ 1. The draft also shares the target's
+   *quantized* lm_head (upstream refuses), and the V2 sampler now takes our
+   sort-free small-k top-k/top-p path. MTP mode is untouched (re-measured:
+   110.7 / 113.4 tok/s, 73,777-token pool).
+2. **The drafter itself is 1.92B parameters, 3.85 GB in bf16** — read once per
+   step, that is +5 ms on a 3090 and no gain (106 / 112 tok/s, measured), and it
+   leaves a 21k-token KV pool. `drafter/capture_dflash2.py` hooks the drafter's
+   own linear layers inside vLLM on 400 real prompts (~290k rows per layer, plus
+   the context-KV precompute's input distribution for the k/v rows) and
+   `drafter/quant_dflash2.py` GPTQ-quantizes the 36 matrices to W4A16
+   compressed-tensors (Marlin): **1.19 GB**, shipped as
+   [syvai/Qwen3.8-27B-DFlash2-W4A16](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16)
+   (`fetch_dflash2.py`). int4 costs ~5% acceptance at default sampling (3.2 vs
+   3.4 tokens per step) and nothing at greedy; keeping `fc` in bf16 did not
+   recover it.
+3. **Result** (`bench/run_benchmarks.sh single`, fast variant target): 26.5 ms
+   per step vs MTP's 24.8, 3.2-3.4 tokens per step vs 2.8-2.9 → **121-128 tok/s
+   at default sampling and 118-134 greedy at C1** (MTP: 111-115 / 115-124), and
+   a higher decode rate at C2-C8. Same output distribution by construction
+   (perplexity 8.094, GSM8K 96.0%).
+
+Its limits are memory-shaped, not speed-shaped: each request holds 1+7
+recurrent-state slots (0.7 GB), so from 8 concurrent long generations MTP's
+e2e is higher again (309 vs 235 tok/s); the drafter's sliding-window KV group,
+those slots and the V2 runner's unaccounted CUDA graphs cap it at 40k context
+(MTP: 64k; `CTX=long`/`huge` stay MTP); and its 2,048-token attention window
+loses acceptance on long-context tasks (2.3-2.6 vs 2.6-3.0 tokens per step at
+12-36k, where MTP is 5-10% ahead e2e). For one to four people chatting with
+normal context — what single-user mode is for — it is the fastest config in
+this repo. Full table in [single-user/README.md](single-user/README.md).
 
 ## Setup
 
@@ -273,6 +322,8 @@ venv/bin/python build_draft_vocab.py models/Qwen3.8-27B-W4A16-AutoRound --ids dr
 # single-user "fast" variant (~1 GB from the Hub, hardlinks the rest): int4-GPTQ
 # lm_head + drafter; single-user/start_qwen.sh picks it up automatically
 venv/bin/python fetch_fast_variant.py
+# optional: the W4A16 DFlash2 block drafter (1.2 GB) for SPEC=dflash2 single-user mode
+venv/bin/python fetch_dflash2.py
 
 # patch vllm (all written against 0.27.1; reapply after upgrades)
 for p in patches/*.patch; do
@@ -348,8 +399,9 @@ difference is gotcha 16 below.
   runs `batch/start_qwen.sh`. One GPU, so one at a time
   (`docker compose --profile single down` before `--profile batch up -d`).
 - Every start-script knob works from `.env`, which is passed straight into the
-  container: `CTX=long`, `KV=kvarn`, `MAX_LEN=`, `MAX_SEQS=`, `SPEC_ATTN=0`,
-  `EXTRA_ARGS=...`. `PORT` (default 18020) and `MODELS_DIR` (default `./models`,
+  container: `CTX=long`, `KV=kvarn`, `SPEC=dflash2`, `MAX_LEN=`, `MAX_SEQS=`,
+  `SPEC_ATTN=0`, `EXTRA_ARGS=...` (`prepare` also fetches the DFlash2 drafter;
+  `DFLASH2=0` skips it). `PORT` (default 18020) and `MODELS_DIR` (default `./models`,
   so a venv install and the container can share one download) are read by
   compose itself.
 - `docker compose run --rm single verify` runs `verify.sh` inside the container
@@ -487,6 +539,19 @@ Things that each cost us hours, in rough order of pain:
     (The WSL2 notes above pin it the other way round — record the cold-start
     `--kv-cache-memory` recommendation and pass it via `EXTRA_ARGS` — if you
     prefer the extra transient headroom to the extra KV pages.)
+17. **vLLM picks the speculative method from the model *path*.** `"dflash" in
+    model_path` switches `method` to dflash — for the *target* too, since MTP
+    uses the target path as its draft model. A checkout under a directory with
+    "dflash" in its name turns `SPEC=mtp` into a crash in `EAGLEConfig`
+    (`'Qwen3_5Config' object has no attribute 'vocab_size'`). Name your
+    directories accordingly.
+18. **The V2 model runner (`SPEC=dflash2`) does not count its CUDA graphs when
+    sizing the KV pool**, and the hybrid allocator gives the drafter's 5
+    sliding-window layers a full-length KV group with 25% layer padding. Hence
+    `GPU_UTIL` 0.90 and 40k context in that mode; 0.93 / 64k would OOM at the
+    profiled activation peak. It also answers `thinking_token_budget` with 400,
+    and the first request after a cold start JIT-compiles four Triton kernels
+    (~5 s once; cached in `~/.triton`).
 
 ## 262k context: the KVarN KV cache
 

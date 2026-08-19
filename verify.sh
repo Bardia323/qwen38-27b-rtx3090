@@ -87,6 +87,12 @@ fi
 
 echo "== single-user fast variant (optional)"
 if [ -d "$HERE/models/Qwen3.8-27B-W4A16-AutoRound-fast" ]; then ok "fast variant present (int4-GPTQ lm_head/MTP, own-output draft vocab)"; else warn "no models/Qwen3.8-27B-W4A16-AutoRound-fast (venv/bin/python fetch_fast_variant.py; single-user mode is ~15% slower without it)"; fi
+echo "== single-user DFlash2 drafter (optional, SPEC=dflash2)"
+if [ -f "$HERE/models/Qwen3.8-27B-DFlash2-W4A16/config.json" ]; then
+  $PY -c "import json,sys; c=json.load(open('$HERE/models/Qwen3.8-27B-DFlash2-W4A16/config.json')); assert c['architectures']==['DFlash2DraftModel'] and c['quantization_config']['quant_method']=='compressed-tensors'" 2>/dev/null && ok "DFlash2 drafter present, W4A16 (models/Qwen3.8-27B-DFlash2-W4A16)" || fail "models/Qwen3.8-27B-DFlash2-W4A16 is not a quantized DFlash2DraftModel checkpoint"
+  [ -f "$SP/model_executor/models/qwen3_dflash2.py" ] || fail "DFlash2 drafter present but patches/dflash2-backport.patch not applied"
+elif [ -f "$HERE/models/Qwen3.8-27B-DFlash2/config.json" ]; then warn "only the bf16 DFlash2 drafter is present (3.85 GB; venv/bin/python fetch_dflash2.py for the 1 GB W4A16 one)"
+else warn "no DFlash2 drafter (venv/bin/python fetch_dflash2.py; SPEC=dflash2 single-user mode needs it)"; fi
 
 echo "== keys / units"
 [ -s api_key.txt ] || [ -n "${VLLM_API_KEY:-}" ] && ok "API key configured (api_key.txt or VLLM_API_KEY)" || fail "no api_key.txt (openssl rand -hex 24 > api_key.txt)"

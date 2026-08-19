@@ -1,4 +1,4 @@
-# drafter/ — self-distillation data, calibrated int4 requant, and MTP fine-tuning
+# drafter/ — self-distillation data, calibrated int4 requant, MTP fine-tuning, DFlash2 requant
 
 Tooling used to build the single-user "fast" variant of the model
 (`models/Qwen3.8-27B-W4A16-AutoRound-fast`, prebuilt on the Hub as
@@ -59,6 +59,46 @@ The trainer reproduces vLLM's drafter to 1% (checked by replaying captured draft
 with their KV history) so its numbers are trustworthy; use `--eval-only` first, response
 tokens only, true-token criterion.
 
+## DFlash2 drafter: W4A16 requantization
+
+`SPEC=dflash2` single-user mode uses [incoai/Qwen3.8-27B-DFlash2](https://huggingface.co/incoai/Qwen3.8-27B-DFlash2)
+(5 Qwen3-style layers, hidden 5120, 8 KV heads × 128, MLP 17408, an `fc` that projects the
+target's layer 5/19/33/47/61 hidden states, dynamic convs, a candidate selector; 1.92B
+params, 3.85 GB bf16). Read once per decode step that is ~5 ms on a 3090 and a 21k-token
+KV pool, so it ships requantized to W4A16 compressed-tensors (Marlin), 1.19 GB:
+[syvai/Qwen3.8-27B-DFlash2-W4A16](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16)
+(`fetch_dflash2.py`). To rebuild it:
+
+```bash
+V=venv/bin/python
+$V fetch_dflash2.py --bf16                               # models/Qwen3.8-27B-DFlash2 (3.85 GB)
+# 1. Hessians from the drafter's OWN inputs: vLLM in-process, eager (hooks), the bf16 drafter
+#    speculating on 400 prompts of data/gen.jsonl at model-default sampling, ~20 min;
+#    hooks on qkv_proj / o_proj / gate_up_proj (GPU fp32 Hessians), down_proj / fc (rows
+#    dumped to memmaps, reduced on the GPU in a re-exec'd process), plus the input of the
+#    fused context-KV precompute (the k/v rows are applied to those too). ~56 GB of scratch.
+DRAFT=models/Qwen3.8-27B-DFlash2 $V drafter/capture_dflash2.py --prompts 400 --max-tokens 384
+# 2. GPTQ int4 g128 for the 35 layer matrices + fc (k/v blend the context Hessian in),
+#    compressed-tensors export with the vLLM-prefix ignore list (~40 s, GPU must be free:
+#    the fc Hessian is 25600^2)
+$V drafter/quant_dflash2.py models/Qwen3.8-27B-DFlash2 models/Qwen3.8-27B-DFlash2-W4A16 drafter/runs/dflash2/hessians.pt
+```
+
+What the measurements said (8 realistic prompts × 1,024 tokens, fast-variant target):
+
+- int4 GPTQ keeps greedy acceptance (3.65 vs 3.54 tokens per step for bf16) and loses ~5%
+  at the model's default sampling (3.2 vs 3.4): noise in q hurts the acceptance
+  *probability*, not the argmax. Per step it reads 2.7 GB less (31.4 → 28 ms with the base
+  target, 26.5 ms with the fast variant), which is what turns DFlash2 from a wash into a
+  win on this card.
+- `fc` in bf16 instead of int4 (+0.26 GB): no acceptance difference (3.17 vs 3.17).
+- Blending the context-KV input distribution into the k/v Hessians: equal within noise at
+  default sampling (3.31 vs 3.30), shipped because it is the right calibration.
+- Applying the request's top-k/top-p to the selector walk's 16-candidate proposal (cached
+  truncated, so the verify stays lossless — the DFlash2 analogue of the MTP draft
+  truncation): +2%, inside the noise; on by default (`VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` off).
+- Relative weight error of the int4 matrices: 0.147 mean (Frobenius), like the MTP module.
+
 ## Notes that cost time
 
 - `capture.py` aligns hidden states by vLLM's request ids, which are `"<counter>-<uuid>"`
@@ -70,4 +110,10 @@ tokens only, true-token criterion.
   The chain simulation in `train_mtp.py --eval-only` accounts for that.
 - Greedy decoding with speculation is not bit-deterministic across drafter configs
   (verify batches of 5 vs 1 token round differently), so 8 prompts × 1k tokens has a
-  ±3% spread on tokens/step. Repeat before believing a 2% difference.
+  ±3% spread on tokens/step. Repeat before believing a 2% difference. With DFlash2 the
+  greedy spread is wider (3.1-3.6 tokens per step across launch configs), default sampling
+  ±5% per run.
+- `capture_dflash2.py`: an in-process vLLM engine does not give its GPU memory back on
+  `del llm`; the Hessian reduction re-execs the process. The fused `qkv_proj.weight_shape`
+  parameter only holds the last-loaded shard's shape — derive the dense shape from
+  `weight_packed`/`input_size` (the backport's `_dense_kv_rows` does).
