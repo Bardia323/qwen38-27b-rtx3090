@@ -8,7 +8,7 @@ API with key auth, and two ready-made configs depending on what you're doing:
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
 | aggregate, 64 concurrent (128 in / 512 out) | **876 tok/s** end-to-end, ~1,050 steady-state decode (1,025 / ~1,150 with all layers int8) | n/a (8 slots) |
-| single-stream, realistic prompts | 46 tok/s | **~114 tok/s** at default sampling, **118-124 tok/s** greedy (`CTX=fast`, 64k context; 95 / 100 with `CTX=long`, 150k); **121-128 / ~134 tok/s** with the DFlash2 block drafter (`SPEC=dflash2`, 40k context) |
+| single-stream, realistic prompts | 46 tok/s | **~114 tok/s** at default sampling, **118-124 tok/s** greedy (`CTX=fast`, 64k context; 95 / 100 with `CTX=long`, 150k); **121-128 / ~134 tok/s** with the DFlash2 block drafter (`SPEC=dflash2`) |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) |
 
 Both share the same install; the mode is just which launch script you run.
@@ -225,7 +225,7 @@ greedy):
 | + draft vocab counted over the model's own outputs | 107 / 109 | 2.9 / 2.9 | 74% / 74% |
 | + GPTQ-int4 lm_head (calibrated) | 109 / 112 | 2.8 / 2.8 | 73% / 73% |
 | + GPTQ-int4 MTP module (**fast variant, shipped**) | **~114 / 118-124** | 2.8 / 2.9-3.0 | 74% / 77% |
-| DFlash2 block drafter instead of MTP (`SPEC=dflash2`, int4-requantized, 40k ctx) | **121-128 / 118-134** | 3.2-3.4 / 3.1-3.6 | ~75% / ~77% |
+| DFlash2 block drafter instead of MTP (`SPEC=dflash2`, int4-requantized) | **121-128 / 118-134** | 3.2-3.4 / 3.1-3.6 | ~75% / ~77% |
 
 (Steps 4-6 are the same 8-prompt protocol; greedy is deterministic for a
 given server and request order but differs between configs and even with
@@ -285,15 +285,30 @@ size. What it took to make it pay on a 24 GB card, in order:
    a higher decode rate at C2-C8. Same output distribution by construction
    (perplexity 8.094, GSM8K 96.0%).
 
-Its limits are memory-shaped, not speed-shaped: each request holds 1+7
-recurrent-state slots (0.7 GB), so from 8 concurrent long generations MTP's
-e2e is higher again (309 vs 235 tok/s); the drafter's sliding-window KV group,
-those slots and the V2 runner's unaccounted CUDA graphs cap it at 40k context
-(MTP: 64k; `CTX=long`/`huge` stay MTP); and its 2,048-token attention window
-loses acceptance on long-context tasks (2.3-2.6 vs 2.6-3.0 tokens per step at
-12-36k, where MTP is 5-10% ahead e2e). For one to four people chatting with
-normal context — what single-user mode is for — it is the fastest config in
-this repo. Full table in [single-user/README.md](single-user/README.md).
+4. **Getting the context back to 64k** took a second patch
+   (`patches/hybrid-kv-groups-v2-cudagraph.patch`), because the first version of
+   this mode capped out at 40k. vLLM sizes a hybrid model's KV groups by the
+   *smallest* bucket of same-type layers — with the drafter that is its 5
+   sliding-window layers, so the target's 16 attention layers were padded to 20
+   and its 48 GDN layers to 50: 25% more pool for every token of context, to pad
+   the layers that were not the problem. Sliding-window groups only ever hold
+   window-many blocks, so padding *them* costs ~7 MB per request instead. That
+   takes the pool from 105 to 78 KB per token (MTP: 75), i.e. 45,383 tokens at
+   40k → 69,758 at 64k. The same patch makes the V2 runner's CUDA-graph memory
+   explicit (`VLLM_V2_CUDAGRAPH_MEM_MIB`): upstream it returns 0, so ~1.2 GiB of
+   graphs lands on top of `--gpu-memory-utilization` — ask for 0.93, run at 0.98.
+   Since the runner's profiled activation peak also swings ~1 GiB between starts,
+   this mode pins the pool by bytes (`KV_MEM`, 5.2 GiB) rather than by
+   utilization, and start-up is then deterministic (69,758 tokens twice over).
+
+Its limits are memory- and window-shaped, not speed-shaped: each request holds
+1+7 recurrent-state slots (0.7 GB), so from 8 concurrent long generations MTP's
+e2e is higher again (309 vs 235 tok/s); and the drafter's 2,048-token attention
+window loses acceptance on long-context tasks (2.3-2.6 vs 2.6-3.0 tokens per
+step at 12-36k, where MTP is 5-10% ahead e2e). `CTX=long`/`huge` stay MTP. For
+one to four people chatting with normal context — what single-user mode is for
+— it is the fastest config in this repo. Full table in
+[single-user/README.md](single-user/README.md).
 
 ## Setup
 
@@ -546,12 +561,16 @@ Things that each cost us hours, in rough order of pain:
     (`'Qwen3_5Config' object has no attribute 'vocab_size'`). Name your
     directories accordingly.
 18. **The V2 model runner (`SPEC=dflash2`) does not count its CUDA graphs when
-    sizing the KV pool**, and the hybrid allocator gives the drafter's 5
-    sliding-window layers a full-length KV group with 25% layer padding. Hence
-    `GPU_UTIL` 0.90 and 40k context in that mode; 0.93 / 64k would OOM at the
-    profiled activation peak. It also answers `thinking_token_budget` with 400,
-    and the first request after a cold start JIT-compiles four Triton kernels
-    (~5 s once; cached in `~/.triton`).
+    sizing the KV pool** (~1.2 GiB on top of whatever `--gpu-memory-utilization`
+    you asked for), the hybrid allocator sizes KV groups by the smallest layer
+    bucket, and the profiled activation peak varies by ~1 GiB between starts of
+    the *same* config — three ways to get a server that either wastes a quarter
+    of its pool or dies mid-request. `patches/hybrid-kv-groups-v2-cudagraph.patch`
+    fixes the first two; for the third, pin the pool in bytes
+    (`--kv-cache-memory`, what `KV_MEM` does) instead of tuning utilization. That
+    runner also answers `thinking_token_budget` with 400, and the first request
+    after a cold start JIT-compiles four Triton kernels (~5 s once; cached in
+    `~/.triton`).
 
 ## 262k context: the KVarN KV cache
 

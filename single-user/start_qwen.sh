@@ -48,7 +48,6 @@ PORT=${PORT:-18020}
 MAX_SEQS=${MAX_SEQS:-8}
 # 0.93 here, NOT batch mode's 0.972: the DeltaNet workspace in the MTP decode
 # path allocates beyond the startup memory profile (main README, gotcha 4).
-USER_GPU_UTIL=$GPU_UTIL
 GPU_UTIL=${GPU_UTIL:-0.93}
 API_SERVERS=${API_SERVERS:-1}
 # CTX=long (default): fp8 KV via FlashInfer, 150k context, 3 drafts.
@@ -98,12 +97,20 @@ if [ "$SPEC" = "dflash2" ]; then
   SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":$DRAFT_TOKENS}"
   # The V2 model runner captures decode graphs in multiples of k+1 tokens: cover MAX_SEQS requests.
   CG=${CG:-$((MAX_SEQS * (DRAFT_TOKENS + 1)))}
-  # Context and memory: the drafter's 5 sliding-window layers get a full-length KV group
-  # from the 0.27.1 hybrid allocator, each request holds 1+7 recurrent-state slots, and
-  # the V2 runner does not count its CUDA graphs (~1.2 GiB) when sizing the KV pool, so
-  # this mode runs at 0.90 and 40k context (64k with SPEC=mtp). Measured: 47k-token pool.
-  MAX_LEN=${DFLASH_MAX_LEN:-40960}
-  [ -n "$USER_GPU_UTIL" ] || GPU_UTIL=${DFLASH_GPU_UTIL:-0.90}
+  # Memory: patches/hybrid-kv-groups-v2-cudagraph.patch stops the drafter's 5
+  # sliding-window layers from padding the target's attention/GDN layers (78 instead of
+  # 105 KB of pool per token), which is what makes 64k reachable here. The V2 runner's
+  # profiled activation peak swings ~1 GiB between starts, so the pool is pinned by bytes
+  # rather than by gpu-memory-utilization: 5.2 GiB -> 69,758 tokens = 1.06x at 64k,
+  # leaving ~1.1 GiB for transients (the same margin MTP mode runs with). Soak-tested
+  # with a 60k prompt, 4x16k concurrent and 8x4k generations. Lower it if you also run
+  # something else on the card; KV_MEM= (empty) falls back to GPU_UTIL.
+  MAX_LEN=${DFLASH_MAX_LEN:-65536}
+  KV_MEM=${KV_MEM-5583457484}
+  [ -n "$KV_MEM" ] && EXTRA_ARGS="--kv-cache-memory=$KV_MEM ${EXTRA_ARGS}"
+  # If you tune GPU_UTIL instead, make the V2 runner count its CUDA graphs (~1.2-1.3 GiB
+  # at these capture sizes) as well:
+  export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
 else
   SPEC_CFG="{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}"
   CG=${CG:-32}

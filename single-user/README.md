@@ -51,7 +51,7 @@ a shared box `CTX=long` or `DRAFT_TOKENS=3` is the better single-user config.
 Batch mode does 45-46 tok/s single-stream on the same prompts, and overtakes
 this mode from C8 up.
 
-**`SPEC=dflash2` — the DFlash2 block drafter (40k context)**, same protocol,
+**`SPEC=dflash2` — the DFlash2 block drafter (64k context)**, same protocol,
 `CTX=fast` + fast variant, W4A16 drafter from `fetch_dflash2.py`:
 
 | Cohort | e2e, model-default sampling | decode | e2e, greedy | decode | tokens per step | mean TTFT |
@@ -83,12 +83,14 @@ decode rate is higher at every cohort. Where it is *not* the better choice:
   against MTP's 2.6-3.0, and the drafter's own prefill adds ~15% to TTFT; end to
   end the two are within 5-10% there, MTP ahead. Up to ~8k tokens of context,
   which is most single-user traffic, DFlash2 wins.
-- **Context length**: 40k (`DFLASH_MAX_LEN`) at `GPU_UTIL` 0.90, not 64k: the
-  drafter's sliding-window layers get a full-length KV group from 0.27.1's
-  hybrid allocator (+25% padding), the extra state slots, and the V2 runner does
-  not count its ~1.2 GiB of CUDA graphs when sizing the KV pool (measured pool:
-  45,383 tokens, 1.11× at 40,960). `CTX=long` / `CTX=huge` stay MTP (the drafter
-  needs FLASH_ATTN/bf16 KV; the script falls back with a message).
+- **Context length**: 64k, same as MTP mode, but the pool is pinned by bytes
+  (`KV_MEM`, 5.2 GiB → 69,758 tokens = 1.06× at 65,536) instead of by
+  `GPU_UTIL`: `patches/hybrid-kv-groups-v2-cudagraph.patch` stops the drafter's
+  5 sliding-window layers from padding the target's attention/GDN layers (105 →
+  78 KB of pool per token; without it this mode caps out at ~40k), and the V2
+  runner's profiled activation peak swings ~1 GiB between starts, which makes a
+  utilization-based setting non-deterministic. `CTX=long` / `CTX=huge` stay MTP
+  (the drafter needs FLASH_ATTN/bf16 KV; the script falls back with a message).
 - The V2 runner rejects the `thinking_token_budget` request parameter (HTTP
   400); everything else we use (logprobs, prompt_logprobs, n, stop, seeds,
   structured outputs, penalties, streaming, thinking) was checked
@@ -180,7 +182,7 @@ patches; `bash verify.sh --no-server` checks all of it). Then:
 ```bash
 bash single-user/start_qwen.sh                  # MTP (64k context)
 venv/bin/python fetch_dflash2.py                # once: the 1.2 GB W4A16 DFlash2 drafter
-SPEC=dflash2 bash single-user/start_qwen.sh     # DFlash2 (40k context, +10-15% at C1)
+SPEC=dflash2 bash single-user/start_qwen.sh     # DFlash2 (64k context, +10-15% at C1)
 bash bench/run_benchmarks.sh single             # reproduces the tables above
 ```
 
@@ -210,7 +212,7 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 |---|---|---|
 | `MODEL` | `models/Qwen3.8-27B-W4A16-AutoRound-fast` if present, else the base dir | the fast variant (`fetch_fast_variant.py`) is +15% |
 | `CTX` | `fast` | `fast`: bf16 KV / FlashAttention / 64k / 4 drafts / split-KV attention. `long`: fp8 KV / FlashInfer / 150k / 3 drafts, ~15% slower at C1, faster from C4 up. `huge`: KVarN 4/2-bit KV / 200k / 3 drafts (needs `bash kvarn/install.sh`; main README "262k context") |
-| `SPEC` | `mtp` | `dflash2`: the DFlash2 block drafter (`fetch_dflash2.py`; `CTX=fast` only, V2 model runner). `DRAFT` overrides the drafter dir, `DFLASH_TOKENS` (7) the block, `DFLASH_MAX_LEN` (40960) and `DFLASH_GPU_UTIL` (0.90) its memory defaults; `VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` disables the proposal truncation, `VLLM_DFLASH2_TORCH_TOPK=1` avoids the FlashInfer top-k JIT |
+| `SPEC` | `mtp` | `dflash2`: the DFlash2 block drafter (`fetch_dflash2.py`; `CTX=fast` only, V2 model runner, 64k). `DRAFT` overrides the drafter dir, `DFLASH_TOKENS` (7) the block, `DFLASH_MAX_LEN` (65536) the context, `KV_MEM` (5583457484 = 5.2 GiB) pins the KV pool — set `KV_MEM=` to size it from `GPU_UTIL` instead; `VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` disables the proposal truncation, `VLLM_DFLASH2_TORCH_TOPK=1` avoids the FlashInfer top-k JIT |
 | `DRAFT_TOKENS` | 4 (3 for `CTX=long`/`huge`) | speculative depth; 5 and 6 are slower |
 | `SPEC_ATTN` | 1 (`CTX=fast` only) | split-KV Triton attention for the verify step (`patches/spec-decode-attn.patch`); 0 = FlashAttention-2 |
 | `DRAFT_SAMPLE` | `probabilistic` | `greedy` drafts: same speed at T=0, ~15% slower at T>0 |
