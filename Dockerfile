@@ -24,7 +24,7 @@ COPY docker/requirements.txt docker/requirements.txt
 RUN venv/bin/pip install -r docker/requirements.txt
 
 COPY . .
-RUN set -e; SP=$(venv/bin/python -c 'import vllm, os; print(os.path.dirname(vllm.__file__))'); \
+RUN set -e; SP=$(venv/bin/python -c 'import vllm, os; print(os.path.dirname(vllm.__file__))' | tail -n1); \
     for p in patches/*.patch; do echo "== $p"; patch -p1 -d "$SP" < "$p"; done; \
     bash kvarn/install.sh; \
     bash verify.sh --install
