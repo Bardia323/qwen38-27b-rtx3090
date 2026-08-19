@@ -8,8 +8,4 @@ qwen.log
 venv/
 drafter/data/
 drafter/runs/
-marlin-tune/build/
-marlin-tune/*.so
-marlin-tune/csrc*/
-marlin-tune/cuda13-home/
 .env

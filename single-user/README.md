@@ -18,14 +18,16 @@ Realistic chat prompts (8 mixed English/Danish/code tasks in
 **`CTX=fast` + fast variant (the default; 64k context)**, as reproduced by
 `bash bench/run_benchmarks.sh single`:
 
-| Cohort | e2e, model-default sampling (T 1.0, top-p 0.95, top-k 20) | decode | e2e, greedy | decode | tokens per step | mean TTFT |
-|---|---|---|---|---|---|---|
-| C1 | **111.1 tok/s** | 113.6 | **115.3 tok/s** | 118.3 | 2.82 / 2.88 | 172 ms |
-| C2 | 173.1 tok/s | 194.0 | 175.9 tok/s | 194.9 | 2.87 / 2.83 | 278 ms |
-| C4 | 220.9 tok/s | 258.6 | 256.2 tok/s | 292.6 | 2.71 / 2.98 | 341 ms |
-| C8 | 309.2 tok/s | 379.9 | 321.9 tok/s | 404.0 | 2.71 / 2.79 | 1,006 ms |
+| Cohort | decode, model-default sampling (T 1.0, top-p 0.95, top-k 20) | decode, greedy | tokens per step | e2e (default / greedy) | mean TTFT |
+|---|---|---|---|---|---|
+| C1 | **113.6 tok/s** | **118.3 tok/s** | 2.82 / 2.88 | 111.1 / 115.3 | 172 ms |
+| C2 | 194.0 tok/s | 194.9 tok/s | 2.87 / 2.83 | 173.1 / 175.9 | 278 ms |
+| C4 | 258.6 tok/s | 292.6 tok/s | 2.71 / 2.98 | 220.9 / 256.2 | 341 ms |
+| C8 | 379.9 tok/s | 404.0 tok/s | 2.71 / 2.79 | 309.2 / 321.9 | 1,006 ms |
 
-Decode throughput is C × 1000 / mean TPOT; e2e includes prefill and the tail.
+Decode throughput — C × 1000 / mean TPOT — is the number to read: it is the rate
+you feel once generation starts. The e2e column includes prefill and the tail of
+the slowest request, so it is lower by construction.
 Per-position draft acceptance at C1: 74% / 50% / 34% / 24% (T 1.0), 77% / 55%
 / 40% / 30% (greedy). The best C1 repeats read 115 / 124 tok/s decode: greedy
 generation is deterministic for a given server and request order, but a
@@ -38,12 +40,12 @@ en/da/code), GSM8K 96.5% (200 questions, greedy), same as the base.
 95.3 / 100.3 tok/s at C1 (T default / greedy, 2.58 / 2.61 tokens per step).
 With the base requantization and the earlier draft vocabulary, all cohorts:
 
-| Cohort | e2e, model-default sampling | decode | e2e, greedy | decode | tokens per step | mean TTFT |
-|---|---|---|---|---|---|---|
-| C1 | 83.4 tok/s | 84.7 | 87.1 tok/s | 89.3 | 2.46 / 2.43 | 179 ms |
-| C2 | 146.6 tok/s | 168.2 | 160.3 tok/s | 177.6 | 2.47 / 2.42 | 233 ms |
-| C4 | 256.8 tok/s | 289.2 | 256.0 tok/s | 303.7 | 2.46 / 2.47 | 358 ms |
-| C8 | 327.9 tok/s | 409.0 | 364.2 tok/s | 450.5 | 2.37 / 2.50 | 1,069 ms |
+| Cohort | decode, model-default sampling | decode, greedy | tokens per step | e2e (default / greedy) | mean TTFT |
+|---|---|---|---|---|---|
+| C1 | 84.7 tok/s | 89.3 tok/s | 2.46 / 2.43 | 83.4 / 87.1 | 179 ms |
+| C2 | 168.2 tok/s | 177.6 tok/s | 2.47 / 2.42 | 146.6 / 160.3 | 233 ms |
+| C4 | 289.2 tok/s | 303.7 tok/s | 2.46 / 2.47 | 256.8 / 256.0 | 358 ms |
+| C8 | 409.0 tok/s | 450.5 tok/s | 2.37 / 2.50 | 327.9 / 364.2 | 1,069 ms |
 
 Four drafts win up to two concurrent users; from C4 up the three-draft config
 is ahead (rejected drafts cost more when the verify batch is bigger), so for
@@ -54,12 +56,12 @@ this mode from C8 up.
 **`SPEC=dflash2` — the DFlash2 block drafter (64k context)**, same protocol,
 `CTX=fast` + fast variant, W4A16 drafter from `fetch_dflash2.py`:
 
-| Cohort | e2e, model-default sampling | decode | e2e, greedy | decode | tokens per step | mean TTFT |
-|---|---|---|---|---|---|---|
-| C1 | **119.2 tok/s** | 122.1 | **126.6 tok/s** | 131.9 | 3.14 / 3.34 | 170 ms |
-| C2 | 172.6 tok/s | 191.4 | 191.1 tok/s | 209.6 | 3.06 / 3.34 | 227 ms |
-| C4 | 233.8 tok/s | 286.7 | 254.1 tok/s | 309.6 | 3.25 / 3.48 | 343 ms |
-| C8 | 257.3 tok/s | 373.7 | 241.3 tok/s | 390.6 | 3.36 / 3.28 | 2,603 ms |
+| Cohort | decode, model-default sampling | decode, greedy | tokens per step | e2e (default / greedy) | mean TTFT |
+|---|---|---|---|---|---|
+| C1 | **122.1 tok/s** | **131.9 tok/s** | 3.14 / 3.34 | 119.2 / 126.6 | 170 ms |
+| C2 | 191.4 tok/s | 209.6 tok/s | 3.06 / 3.34 | 172.6 / 191.1 | 227 ms |
+| C4 | 286.7 tok/s | 309.6 tok/s | 3.25 / 3.48 | 233.8 / 254.1 | 343 ms |
+| C8 | 373.7 tok/s | 390.6 tok/s | 3.36 / 3.28 | 257.3 / 241.3 | 2,603 ms |
 
 The C1 row is the best of several runs; expect 117-127 e2e depending on the session.
 Greedy repeats *within* a server session are bit-identical (four in a row: 125.0-126.6 e2e,
@@ -215,7 +217,7 @@ k=3 passed every concurrency soak we ran (C2/C4/C8 with staggered finishes,
 `DRAFT_TOKENS=2` costs ~5% and is the most conservative setting.
 
 Why not 150? The verify pass alone reads ~13 GB of weights (~17 ms at what
-this card actually delivers on 16-92 MB reads; see `marlin-tune/`) plus ~4 ms
+this card actually delivers on 16-92 MB reads) plus ~4 ms
 of drafts and sampling, and Qwen's MTP head agrees with the target on ~75-77%
 of first drafts on real text once it can propose the right tokens, so ~3
 accepted tokens per ~24 ms step is where a single-layer chain drafter tops

@@ -8,11 +8,11 @@ eval runs. Tuned for aggregate tokens per second, not per-request latency.
 `vllm bench serve`, random dataset, 256 requests, RTX 3090 at 250 W, default
 config (fp16 recurrent state, int8 activations on the MLP GEMMs):
 
-| workload | output tok/s (e2e) | steady-state decode | median TPOT | median TTFT |
+| workload | steady-state decode | output tok/s (e2e) | median TPOT | median TTFT |
 |---|---|---|---|---|
 | 256/256, 1 concurrent | 46 | 46 | 21.7 ms | 230 ms |
-| 128/512, 64 concurrent | **942** | ~1,094 | 62.2 ms | 3.0 s* |
-| 256/256, 64 concurrent | 673 | ~1,094 | 81.4 ms | 3.4 s* |
+| 128/512, 64 concurrent | **~1,094** | 942 | 62.2 ms | 3.0 s* |
+| 256/256, 64 concurrent | ~1,094 | 673 | 81.4 ms | 3.4 s* |
 
 (Re-measured on the current stack; two passes each, within 0.4% of one another. The 128/512
 row read 876 when this repo was first published — the difference is everything that landed

@@ -7,8 +7,8 @@ API with key auth, and two ready-made configs depending on what you're doing:
 | | [batch/](batch/) | [single-user/](single-user/) |
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
-| aggregate, 64 concurrent (128 in / 512 out) | **942 tok/s** end-to-end, ~1,094 steady-state decode (1,042 / ~1,222 with all layers int8) | n/a (8 slots) |
-| single-stream (C1), realistic prompts | 46 tok/s | MTP: **114** tok/s at default sampling, **124** greedy (`CTX=fast`, 64k; 95 / 100 with `CTX=long`, 150k). DFlash2 (`SPEC=dflash2`): **119** default, **127** greedy (132 by decode rate) |
+| aggregate, 64 concurrent (128 in / 512 out) | **~1,094 tok/s** steady-state decode, 942 end-to-end (~1,222 / 1,042 with all layers int8) | n/a (8 slots) |
+| single-stream (C1) decode rate, realistic prompts | 46 tok/s | MTP: **114** tok/s at default sampling, **118** greedy (`CTX=fast`, 64k; 85 / 89 with `CTX=long`, 150k). DFlash2 (`SPEC=dflash2`): **122** default, **132** greedy |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) |
 
 Both modes share one install — the mode is just which launch script you run.
@@ -52,17 +52,18 @@ Danish, code), 1,024-token answers, model-default sampling:
 
 | Cohort | ninfer-3090 (MTP3, random tokens) | this repo, batch | single-user, MTP | single-user, DFlash2 |
 |---|---|---|---|---|
-| C1 | 70.19 tok/s | 45.4 | 111.1 | **119.2** |
-| C2 | 89.43 tok/s | 81.8 | **173.1** | 172.6 |
-| C4 | 97.89 tok/s | 153.8 | 220.9 (256.8 with `CTX=long`) | **233.8** |
-| C8 | 161.28 tok/s | 298.4 | **309.2** (327.9 with `CTX=long`) | 257.3 |
-| C64 (128 in / 512 out) | not supported | **942** | — | — |
+| C1 | 70.19 tok/s | 45.4 | 113.6 | **122.1** |
+| C2 | 89.43 tok/s | 82.6 | **194.0** | 191.4 |
+| C4 | 97.89 tok/s | 165.6 | 258.6 (289.2 with `CTX=long`) | **286.7** |
+| C8 | 161.28 tok/s | 298.5 | **379.9** (409.0 with `CTX=long`) | 373.7 |
+| C64 (128 in / 512 out) | not supported | **~1,094** | — | — |
 
-End-to-end output tok/s, best of the runs we have, from `bench/run_benchmarks.sh`;
-greedy instead of default sampling reads 126.6 / 191.1 / 254.1 / 241.3 for DFlash2.
-The C64 and DFlash2 columns are from the current stack, the other two from earlier
-runs. Peak VRAM is comparable to theirs (23.0 vs 22.1 GiB at C8) — the gap is mostly
-vLLM's continuous batching plus the memory this repo's requantization frees up.
+Decode rate (C × 1000 / mean TPOT), best of the runs we have, from
+`bench/run_benchmarks.sh`; greedy instead of default sampling reads
+131.9 / 209.6 / 309.6 / 390.6 for DFlash2. The C64 and DFlash2 columns are from the
+current stack, the other two from earlier runs; ninfer's published figures are their
+own protocol. Peak VRAM is comparable to theirs (23.0 vs 22.1 GiB at C8) — the gap is
+mostly vLLM's continuous batching plus the memory this repo's requantization frees up.
 
 ### Quality
 
@@ -127,7 +128,7 @@ and is also the only backend the split-KV attention patch applies to.
 Two things that did *not* help, measured rather than assumed: fine-tuning the
 MTP head on the model's own outputs (KL halves, greedy top-1 on response
 tokens unchanged; `drafter/README.md`), and retuning Marlin's tile
-configuration for M ≤ 16 on sm86 (`marlin-tune/`: 3-7% per GEMM in isolation,
+configuration for M ≤ 16 on sm86 (3-7% per GEMM in isolation,
 nothing measurable end to end — the remaining gap to peak bandwidth is the
 memory system's ramp on 16-92 MB reads, not the kernel).
 
@@ -214,7 +215,7 @@ perplexity / GSM8K rows.
 | [docs/long-context.md](docs/long-context.md) | 262k context with the KVarN 4/2-bit KV cache, and what vLLM's own per-token-head KV modes are worth here. |
 | [batch/](batch/) · [single-user/](single-user/) | The two serving modes: full benchmark tables, every env knob, systemd units. |
 | [drafter/](drafter/) | How the draft vocabulary, the int4 drafters and the DFlash2 requantization were built — including what did not work. |
-| [kvarn/](kvarn/) · [marlin-tune/](marlin-tune/) | The KVarN port, and a Marlin tile-tuning experiment that did not pay off. |
+| [kvarn/](kvarn/) | The KVarN 4/2-bit KV cache port. |
 
 ## License
 
