@@ -11,29 +11,14 @@ API with key auth, and two ready-made configs depending on what you're doing:
 | single-stream, realistic prompts | 46 tok/s | **~114 tok/s** at default sampling, **118-124 tok/s** greedy (`CTX=fast`, 64k context; 95 / 100 with `CTX=long`, 150k); **117-127 / 120-134 tok/s** with the DFlash2 block drafter (`SPEC=dflash2`) |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) |
 
-Both share the same install; the mode is just which launch script you run.
-The crossover is around 8 concurrent users: below that, speculation wins;
-above, plain batching. All numbers measured with `vllm bench serve` on an
-RTX 3090 at a 250 W power limit (stock is 350 W, so probably conservative).
-Full tables in each mode's README.
+Both modes share one install — the mode is just which launch script you run.
+Speculation wins below ~8 concurrent users, plain batching above. Numbers are
+`vllm bench serve` on an RTX 3090 at a 250 W power limit.
 
-Where these numbers came from, in one line each: fixing a per-request memory
-cost that silently capped the batch server at 37 running requests (2.4×), an
-int8-activation kernel path that vLLM already ships but that produces garbage
-on this checkpoint until a sign bug is worked around (1.4×), making
-speculative drafts cheap enough that four of them pay off (1.3×), and — the
-single biggest single-user win — a draft vocabulary counted over the model's
-own outputs instead of web text (1.1×). All of it is in `patches/`, the
-`quant_*.py` / `build_draft_vocab.py` scripts and `drafter/` — explained at
-length in [docs/optimizations.md](docs/optimizations.md).
-
-Prefill is its own budget, independent of mode and of concurrency: ~1,810
-tok/s of prompt processing at 1k inputs in batch mode (int8 tensor cores;
-~1,210 tok/s on the W4A16 kernels single-user mode uses), degrading gently
-with length because only 16 of 64 layers pay quadratic attention — 1,000 tok/s
-at 100k. A 100k prompt costs ~100 s of TTFT (~130 s in single-user mode), and
-concurrent prompts queue linearly behind each other. Full matrix in
-[batch/README.md](batch/README.md#prefill).
+Prefill is a separate budget from either: ~1,810 tok/s at 1k inputs in batch
+mode (~1,210 single-user), ~1,000 tok/s at 100k, so a 100k prompt costs ~100 s
+of TTFT ([full matrix](batch/README.md#prefill)). How each number was won:
+[docs/optimizations.md](docs/optimizations.md).
 
 ## Quick start
 
