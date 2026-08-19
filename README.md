@@ -8,7 +8,7 @@ API with key auth, and two ready-made configs depending on what you're doing:
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
 | aggregate, 64 concurrent (128 in / 512 out) | **942 tok/s** end-to-end, ~1,094 steady-state decode (1,042 / ~1,222 with all layers int8) | n/a (8 slots) |
-| single-stream, realistic prompts | 46 tok/s | **~114 tok/s** at default sampling, **118-124 tok/s** greedy (`CTX=fast`, 64k context; 95 / 100 with `CTX=long`, 150k); **117-127 / 120-134 tok/s** with the DFlash2 block drafter (`SPEC=dflash2`) |
+| single-stream (C1), realistic prompts | 46 tok/s | MTP: **114** tok/s at default sampling, **118-124** greedy (`CTX=fast`, 64k; 95 / 100 with `CTX=long`, 150k). DFlash2 (`SPEC=dflash2`): **117.8** default, **125.7** greedy — greedy has read 120-134 across sessions, see [single-user/](single-user/) |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) |
 
 Both modes share one install — the mode is just which launch script you run.
@@ -77,33 +77,9 @@ tables: [docs/quality.md](docs/quality.md).
 
 ### Why this isn't just `vllm serve`
 
-Nine things, one line each — the reasoning, measurements and code pointers are
-in [docs/optimizations.md](docs/optimizations.md):
-
-1. **Both embedding matrices requantized** (`quant_lm_head.py`, `quant_embed.py`)
-   — the public W4A16 quants leave two 2.5 GB bf16 matrices alone. 2.6 GB back.
-2. **A two-line vLLM patch** so the model code actually uses vLLM's quantized
-   embedding kernel (`patches/qwen3_5-embed-quant.patch`).
-3. **16-bit recurrent state** — the GDN state, not the KV cache, is what bounds
-   concurrency here: 37 of 64 requests were running before this.
-4. **int8 tensor cores for the batched GEMMs, with a bug fix** — vLLM's W4A8
-   Marlin path produces garbage on this checkpoint (negative group scales read
-   as unsigned); two patches fix it and make it per-layer selectable.
-5. **Cheap speculative drafts, and a draft vocabulary counted over the model's
-   own outputs** — 97.5% coverage vs 92% for a web-text list, and every miss is
-   a forced rejection. Worth 10% of single-stream throughput on its own.
-6. **Two decode-path patches for the verify step** — split-KV attention for
-   multi-query decode (FA2 leaves 58 of 82 SMs idle there) and a sort-free
-   top-k/top-p sampler.
-7. **Tuned flags that are easy to get wrong**, plus vLLM PR #50021 vendored for
-   an illegal memory access in the DeltaNet spec-decode kernels.
-8. **Speculation that reads the context** — when the model is reproducing
-   something from its prompt, draft it from the prompt
-   (`patches/dflash2-lookup-drafting.patch`): +29% tokens per step on quoting
-   and listing work, 0.075 ms per step, still lossless.
-9. **Prefix caching for a hybrid model** — opt-in upstream; `PREFIX_CACHE=1`
-   makes a follow-up chat turn on a 24k document cost ~1 s instead of ~23 s, and
-   64 requests sharing a system prompt 17 s instead of 222 s.
+Nine things, from requantizing both embedding matrices to drafting straight out
+of the prompt — one line each, then the reasoning and measurements, in
+[docs/optimizations.md](docs/optimizations.md).
 
 ### What each step buys
 

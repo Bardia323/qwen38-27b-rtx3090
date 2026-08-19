@@ -1,12 +1,39 @@
 # What this repo does that stock vLLM doesn't
 
-The long version of the nine items in the main README, plus the two speculative-decoding modes. If you only want the numbers, the main README's [what each step buys](../README.md#what-each-step-buys) has them.
+Nine things stock vLLM doesn't give you on this model — summarised, then explained — plus the two speculative-decoding modes. For what each one is worth in tokens per second, see [what each step buys](../README.md#what-each-step-buys).
 
 [← back to the main README](../README.md)
 
-## The nine things
+## The short version
 
-Nine things in this repo that stock vLLM doesn't give you:
+One line each; the rest of this page is the long version.
+
+1. **Both embedding matrices requantized** (`quant_lm_head.py`, `quant_embed.py`)
+   — the public W4A16 quants leave two 2.5 GB bf16 matrices alone. 2.6 GB back.
+2. **A two-line vLLM patch** so the model code actually uses vLLM's quantized
+   embedding kernel (`patches/qwen3_5-embed-quant.patch`).
+3. **16-bit recurrent state** — the GDN state, not the KV cache, is what bounds
+   concurrency here: 37 of 64 requests were running before this.
+4. **int8 tensor cores for the batched GEMMs, with a bug fix** — vLLM's W4A8
+   Marlin path produces garbage on this checkpoint (negative group scales read
+   as unsigned); two patches fix it and make it per-layer selectable.
+5. **Cheap speculative drafts, and a draft vocabulary counted over the model's
+   own outputs** — 97.5% coverage vs 92% for a web-text list, and every miss is
+   a forced rejection. Worth 10% of single-stream throughput on its own.
+6. **Two decode-path patches for the verify step** — split-KV attention for
+   multi-query decode (FA2 leaves 58 of 82 SMs idle there) and a sort-free
+   top-k/top-p sampler.
+7. **Tuned flags that are easy to get wrong**, plus vLLM PR #50021 vendored for
+   an illegal memory access in the DeltaNet spec-decode kernels.
+8. **Speculation that reads the context** — when the model is reproducing
+   something from its prompt, draft it from the prompt
+   (`patches/dflash2-lookup-drafting.patch`): +29% tokens per step on quoting
+   and listing work, 0.075 ms per step, still lossless.
+9. **Prefix caching for a hybrid model** — opt-in upstream; `PREFIX_CACHE=1`
+   makes a follow-up chat turn on a 24k document cost ~1 s instead of ~23 s, and
+   64 requests sharing a system prompt 17 s instead of 222 s.
+
+## In full
 
 1. **Both embedding matrices requantized.** Qwen3.8-27B has untied embeddings,
    so the public W4A16 quants carry two separate 2.5 GB bf16 matrices (lm_head
