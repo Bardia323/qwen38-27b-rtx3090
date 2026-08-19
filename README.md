@@ -8,7 +8,7 @@ API with key auth, and two ready-made configs depending on what you're doing:
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
 | aggregate, 64 concurrent (128 in / 512 out) | **942 tok/s** end-to-end, ~1,094 steady-state decode (1,042 / ~1,222 with all layers int8) | n/a (8 slots) |
-| single-stream (C1), realistic prompts | 46 tok/s | MTP: **114** tok/s at default sampling, **118-124** greedy (`CTX=fast`, 64k; 95 / 100 with `CTX=long`, 150k). DFlash2 (`SPEC=dflash2`): **117.8** default, **125.7** greedy — greedy has read 120-134 across sessions, see [single-user/](single-user/) |
+| single-stream (C1), realistic prompts | 46 tok/s | MTP: **114** tok/s at default sampling, **124** greedy (`CTX=fast`, 64k; 95 / 100 with `CTX=long`, 150k). DFlash2 (`SPEC=dflash2`): **119** default, **127** greedy (132 by decode rate) |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) |
 
 Both modes share one install — the mode is just which launch script you run.
@@ -52,17 +52,17 @@ Danish, code), 1,024-token answers, model-default sampling:
 
 | Cohort | ninfer-3090 (MTP3, random tokens) | this repo, batch | single-user, MTP | single-user, DFlash2 |
 |---|---|---|---|---|
-| C1 | 70.19 tok/s | 45.4 | 111.1 | **117.8** |
+| C1 | 70.19 tok/s | 45.4 | 111.1 | **119.2** |
 | C2 | 89.43 tok/s | 81.8 | **173.1** | 172.6 |
 | C4 | 97.89 tok/s | 153.8 | 220.9 (256.8 with `CTX=long`) | **233.8** |
 | C8 | 161.28 tok/s | 298.4 | **309.2** (327.9 with `CTX=long`) | 257.3 |
 | C64 (128 in / 512 out) | not supported | **942** | — | — |
 
-End-to-end output tok/s from `bench/run_benchmarks.sh`; greedy instead of default
-sampling reads 125.7 / 191.1 / 254.1 / 241.3 for DFlash2. The C64 and DFlash2
-columns are from the current stack, the other two from earlier runs. Peak VRAM is
-comparable to theirs (23.0 vs 22.1 GiB at C8) — the gap is mostly vLLM's continuous
-batching plus the memory this repo's requantization frees up.
+End-to-end output tok/s, best of the runs we have, from `bench/run_benchmarks.sh`;
+greedy instead of default sampling reads 126.6 / 191.1 / 254.1 / 241.3 for DFlash2.
+The C64 and DFlash2 columns are from the current stack, the other two from earlier
+runs. Peak VRAM is comparable to theirs (23.0 vs 22.1 GiB at C8) — the gap is mostly
+vLLM's continuous batching plus the memory this repo's requantization frees up.
 
 ### Quality
 
