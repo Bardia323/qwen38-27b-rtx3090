@@ -60,6 +60,17 @@ fi
 INT8_ACT=${INT8_ACT-int8}
 INT8_LAYERS=${INT8_LAYERS-mlp}
 
+# PREFIX_CACHE=1: reuse the KV of a shared prompt prefix across requests, and resume the
+# recurrent (GDN) state from the last cached block boundary. For an API backend where every
+# request carries the same system prompt / document this is the difference between paying
+# for that prefix once and paying for it every time: 64 requests sharing a 5.8k-token system
+# prompt (conc 32) take 222 s without it and 17 s with it. Costs ~14% of the KV pool
+# (223,821 -> 193,298 tokens) and nothing on workloads with no shared prefix (870 vs 876
+# tok/s on the 128/512 row). Hybrid models keep this opt-in upstream.
+if [ "${PREFIX_CACHE:-0}" = "1" ]; then
+  EXTRA_ARGS="--enable-prefix-caching --mamba-cache-mode align ${EXTRA_ARGS}"
+fi
+
 export PATH="$REPO/venv/bin:$PATH"
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 # flashinfer's sampling.cu does not build with older system nvcc (12.0);

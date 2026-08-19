@@ -81,6 +81,24 @@ waits ~40 s). Second, the falloff with length is mild — ~45% from 1k to 100k
 on the int8 path, ~34% on W4A16 — because just 16 of 64 layers pay quadratic
 attention; this is one of the places the hybrid architecture genuinely helps.
 
+## Shared prompts: `PREFIX_CACHE=1`
+
+If every request carries the same system prompt, few-shot block or document — the normal
+shape of an API backend — turn on prefix caching (`--enable-prefix-caching
+--mamba-cache-mode align`, opt-in upstream for hybrid models). The attention KV of the shared
+prefix is reused and the recurrent (GDN) state resumes from the last cached block boundary,
+so the prefix is prefilled once instead of once per request:
+
+| 64 requests sharing a 5,820-token system prompt, concurrency 32 | wall | output | median latency | p90 |
+|---|---|---|---|---|
+| default | 222.2 s | 10.6 tok/s | 94.9 s | 155.3 s |
+| `PREFIX_CACHE=1` | **16.9 s** | **133.9 tok/s** | **8.0 s** | **15.2 s** |
+
+It costs ~14% of the KV pool (223,821 → 193,298 tokens, 1.29x concurrency at 150k instead of
+1.49x) — one extra recurrent-state page per request — and nothing on workloads with no shared
+prefix (870 tok/s on the 128 in / 512 out row, i.e. unchanged). Answers are identical; the
+state resume is exact.
+
 ## Setup
 
 Do the [common setup](../README.md#setup) first (venv, model download,
@@ -117,6 +135,7 @@ All overridable as env vars, defaults in the script:
 
 | var | default | notes |
 |---|---|---|
+| `PREFIX_CACHE` | 0 | 1 = reuse a shared prompt prefix across requests (see above): 13x on shared-prompt workloads, ~14% smaller KV pool |
 | `KV` | `fp8` | `kvarn` switches to the KVarN 4/2-bit KV cache (run `bash kvarn/install.sh` once): 262k context, ~2× the token pool, slower decode — see the main README's "262k context" section |
 | `INT8_ACT` | `int8` | int8 activations on the Marlin GEMMs (int8 tensor cores, weights stay int4). Empty string = plain W4A16 |
 | `INT8_LAYERS` | `mlp` | regex on the layer name that gets int8 activations. `gate_up` for the gentle variant, `.` for everything, or a hand-picked list from `bench/act_calib.py` |

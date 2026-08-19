@@ -97,6 +97,50 @@ decode rate is higher at every cohort. Where it is *not* the better choice:
   (`bench/api_smoke.py`-style run, 12/12). Quality unchanged by construction
   (speculation is exact): perplexity 8.094, GSM8K 96.0% on the fast variant.
 
+### Chat with a long document: prefix caching, and drafting from the context
+
+Two things matter once the prompt is long and the same document comes back every turn.
+
+**`PREFIX_CACHE=1`** turns on vLLM's hybrid prefix caching (`--enable-prefix-caching
+--mamba-cache-mode align`), which upstream keeps opt-in for hybrid models. The attention
+KV of the shared prefix is reused *and* the recurrent (GDN) state resumes from the last
+cached block boundary, so a follow-up turn does not re-run the document:
+
+| 4-turn chat, 24k-token document, greedy | turn 1 | turn 2 | turn 3 | turn 4 |
+|---|---|---|---|---|
+| default | 22.9 s | 23.1 s | 22.8 s | 22.9 s |
+| `PREFIX_CACHE=1` | 23.5 s | **1.15 s** | **0.85 s** | **0.89 s** |
+
+Same answers, token for token (the state resume is exact, not approximate); a control run
+that changes the prefix every turn pays the full 23 s again. It costs one extra recurrent
+state page per request — the KV pool goes 86,727 → 72,475 tokens (MTP) / 68,605 (DFlash2) —
+and draft acceptance is unaffected (2.23 / 2.03 / 2.28 tokens per step with the cache vs
+2.27 / 1.80 / 1.96 without). Worth it for anything conversational; leave it off if you serve
+unrelated one-shot prompts and want the pool.
+
+**Lookup-augmented drafting** (`LOOKUP=1`, on by default for `SPEC=dflash2`) fixes the other
+half. With prefill nearly free, long-context chat is decode-bound, and that is exactly where
+the block drafter is weakest: it sees a 2,048-token window, so when the model quotes or
+reproduces part of a 24k document, the drafter is guessing at text that is sitting verbatim
+in the prompt. `patches/dflash2-lookup-drafting.patch` scans the request's own token history
+for the most recent occurrence of the longest suffix of what has been generated (6-12 tokens)
+and proposes the k tokens that followed it. Lossless: greedy never reads the draft
+distribution, and sampling requests get a point mass on the proposed token, which is a legal
+proposal for the rejection sampler.
+
+| 24k-token document, greedy | tokens/step off → on | e2e off → on |
+|---|---|---|
+| "reproduce every command, verbatim" | 3.60 → **4.65** | 105 → **131 tok/s** |
+| "shorten this, keep the commands" | 2.69 → 2.91 | 82 → 87 tok/s |
+| "quote and explain" | 2.16 → 2.11 | 67 → 65 tok/s |
+| free-form summary / Q&A | 2.31 → 2.30 / 2.02 → 2.01 | unchanged |
+| C1, the 8 short prompts above | 3.13-3.23 → **3.32-3.41** | 118-122 → **125-127 tok/s** |
+
+The cost is 0.075 ms per step at 32k context, batch size independent, and step time is
+unchanged at 26.4 ms. Perplexity 8.0926 (vs 8.094) and GSM8K 96.5% (vs 96.0%) confirm the
+verify stayed exact. `VLLM_DFLASH2_LOOKUP_NMIN` (6) trades recall for precision: 10 is
+slightly more conservative and slightly slower; `LOOKUP=0` turns it off.
+
 The same server measured on the random-token protocol used by
 [ninfer-3090](https://github.com/Don-Chad/ninfer-3090) (256 random tokens in,
 1,024 out) reads anywhere from 35 to 151 tok/s depending on what the model
@@ -212,6 +256,8 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 |---|---|---|
 | `MODEL` | `models/Qwen3.8-27B-W4A16-AutoRound-fast` if present, else the base dir | the fast variant (`fetch_fast_variant.py`) is +15% |
 | `CTX` | `fast` | `fast`: bf16 KV / FlashAttention / 64k / 4 drafts / split-KV attention. `long`: fp8 KV / FlashInfer / 150k / 3 drafts, ~15% slower at C1, faster from C4 up. `huge`: KVarN 4/2-bit KV / 200k / 3 drafts (needs `bash kvarn/install.sh`; main README "262k context") |
+| `PREFIX_CACHE` | 0 | 1 = reuse a shared prompt prefix across requests (`--enable-prefix-caching --mamba-cache-mode align`): 20x faster follow-up turns, ~16% smaller KV pool |
+| `LOOKUP` | 1 (`SPEC=dflash2`) | draft from the request's own context when it repeats itself (`patches/dflash2-lookup-drafting.patch`); `VLLM_DFLASH2_LOOKUP_NMIN` (6) sets the shortest suffix that may override the drafter |
 | `SPEC` | `mtp` | `dflash2`: the DFlash2 block drafter (`fetch_dflash2.py`; `CTX=fast` only, V2 model runner, 64k). `DRAFT` overrides the drafter dir, `DFLASH_TOKENS` (7) the block, `DFLASH_MAX_LEN` (65536) the context, `KV_MEM` (5583457484 = 5.2 GiB) pins the KV pool — set `KV_MEM=` to size it from `GPU_UTIL` instead; `VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` disables the proposal truncation, `VLLM_DFLASH2_TORCH_TOPK=1` avoids the FlashInfer top-k JIT |
 | `DRAFT_TOKENS` | 4 (3 for `CTX=long`/`huge`) | speculative depth; 5 and 6 are slower |
 | `SPEC_ATTN` | 1 (`CTX=fast` only) | split-KV Triton attention for the verify step (`patches/spec-decode-attn.patch`); 0 = FlashAttention-2 |

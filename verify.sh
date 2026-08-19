@@ -38,8 +38,11 @@ fi
 for t in triton flashinfer compressed_tensors; do $PY -c "import $t" 2>/dev/null && ok "python module $t" || fail "python module $t missing"; done
 
 echo "== vLLM patches (patches/*.patch)"
+# The reverse dry-run is exact, but two patches touching the same file (the DFlash2 pair)
+# can no longer be reversed individually once both are applied; then look for their content.
 for p in patches/*.patch; do
   if patch -p1 -R --dry-run -s -d "$SP" < "$p" >/dev/null 2>&1; then ok "$(basename $p) applied"
+  elif $PY patches/_check_applied.py "$p" "$SP" 2>/dev/null; then ok "$(basename $p) applied (content check; hunks overlap another patch)"
   elif patch -p1 -N --dry-run -s -d "$SP" < "$p" >/dev/null 2>&1; then fail "$(basename $p) NOT applied (patch -p1 -d $SP < $p)"
   else fail "$(basename $p) neither applied nor applicable — vLLM version mismatch?"; fi
 done

@@ -1,0 +1,331 @@
+Lookup-augmented block drafting (LABD) for DFlash2: draft from the context, not from the
+drafter, when the context already contains the answer.
+
+A block drafter guesses the next 7 tokens from a 2,048-token attention window. When the model
+is quoting, listing, editing or otherwise reproducing something it was given -- which is most
+of what a long-context assistant does -- those tokens are already sitting verbatim in the
+prompt, tens of thousands of tokens back, where the drafter cannot see them. This finds them:
+one Triton program per request scans the request's own token history (the int32 buffer vLLM
+already maintains, `req_states.all_token_ids`) for the most recent occurrence of the longest
+suffix (nmin..nmax tokens) of what has been generated so far, and proposes the k tokens that
+followed it. 0.075 ms at 32k context, whatever the batch size -- 0.3% of a decode step.
+
+The proposal stays lossless. For greedy requests the draft distribution is never read, so
+overriding the tokens is all there is to it. For sampling requests the overridden positions get
+a point mass on the proposed token, which is a legal proposal distribution for vLLM's rejection
+sampler: the acceptance probability becomes p(x) and the residual (p - q)+ is computed from the
+same buffer, so the output distribution is unchanged. The rewrite keeps the sparse draft-logit
+cache's invariant (every finite entry of a row is listed in `_cached_candidate_ids`, so the next
+step erases it).
+
+Measured on the 3090, W4A16 target + W4A16 DFlash2 drafter, 24k-token document, greedy
+(tokens per step, and end-to-end):
+
+  task                          off            on
+  reproduce all commands   3.60  105 tok/s   4.65  131 tok/s   (+29% / +25%)
+  shorten but keep quotes  2.69   82 tok/s   2.91   87 tok/s
+  quote and explain        2.16   67 tok/s   2.11   65 tok/s
+  free-form summary        2.31   18 tok/s   2.30   18 tok/s
+  free-form Q&A            2.02   63 tok/s   2.01   62 tok/s
+  8 short chat prompts     3.13-3.23 118-122 tok/s   3.32-3.41 125-127 tok/s
+
+i.e. a large win where the model reproduces context, neutral where it does not, and no change
+in step time (26.4 ms both ways). Quality is unchanged by construction: perplexity 8.0926 vs
+8.094, GSM8K 96.5% vs 96.0%.
+
+Knobs: VLLM_DFLASH2_LOOKUP=1 enables it, VLLM_DFLASH2_LOOKUP_NMIN (6) is the shortest suffix
+that may override the drafter -- 10 is slightly more conservative and slightly slower,
+VLLM_DFLASH2_LOOKUP_NMAX (12) caps the match length, VLLM_DFLASH2_LOOKUP_SEARCH bounds how far
+back to scan. single-user/start_qwen.sh sets LOOKUP=1 for SPEC=dflash2.
+
+Requires patches/dflash2-backport.patch. Apply from the installed vllm package directory:
+  patch -p1 -d venv/lib/python3.12/site-packages/vllm < patches/dflash2-lookup-drafting.patch
+
+Written against vLLM 0.27.1.
+
+--- a/v1/worker/gpu/spec_decode/dflash2/speculator.py
++++ b/v1/worker/gpu/spec_decode/dflash2/speculator.py
+@@ -7,11 +7,18 @@
+ import torch
+ 
+ from vllm.config import VllmConfig
++from vllm.logger import init_logger
+ from vllm.config.compilation import CUDAGraphMode
+ from vllm.triton_utils import tl, tldevice, triton
+ from vllm.v1.worker.gpu.sample.gumbel import tl_rand32, tl_rand64
+ from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+ 
++logger = init_logger(__name__)
++from vllm.v1.worker.gpu.spec_decode.dflash2.lookup import (
++    _point_mass_draft_logits_kernel,
++    suffix_lookup,
++)
++
+ 
+ @triton.jit
+ def _selector_walk_kernel(
+@@ -137,6 +144,9 @@
+ 
+ 
+ class DFlash2Speculator(DFlashSpeculator):
++    """DFlash2 = DFlash + local convolutions + candidate selector, optionally with
++    lookup-augmented drafting (VLLM_DFLASH2_LOOKUP=1)."""
++
+     _speculator_name = "DFlash2"
+ 
+     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+@@ -175,6 +185,28 @@
+         self._req_top_p: torch.Tensor | None = None
+         self._req_top_k: torch.Tensor | None = None
+         self._truncate = os.environ.get("VLLM_DFLASH2_DRAFT_TOPK_TOPP", "1") == "1"
++        # Lookup-augmented block drafting: propose the continuation of an earlier
++        # occurrence of the current suffix instead of the model's guess (lookup.py).
++        self._lookup = os.environ.get("VLLM_DFLASH2_LOOKUP", "0") == "1"
++        self._lookup_nmin = int(os.environ.get("VLLM_DFLASH2_LOOKUP_NMIN", "6"))
++        self._lookup_nmax = int(os.environ.get("VLLM_DFLASH2_LOOKUP_NMAX", "12"))
++        self._lookup_search = int(os.environ.get("VLLM_DFLASH2_LOOKUP_SEARCH", str(1 << 30)))
++        self._req_states = None
++        self._lookup_tokens = torch.zeros(
++            (self.max_num_reqs, self.num_speculative_steps), dtype=torch.int32, device=device
++        )
++        self._lookup_len = torch.zeros(self.max_num_reqs, dtype=torch.int32, device=device)
++        self._lookup_hits = torch.zeros((), dtype=torch.int64, device=device)
++
++        if self._lookup:
++            logger.info(
++                "DFlash2 lookup-augmented drafting on (nmin=%d nmax=%d search=%d)",
++                self._lookup_nmin, self._lookup_nmax, self._lookup_search,
++            )
++
++    def set_req_states(self, req_states) -> None:
++        """The token history the lookup matches against (set by the model runner)."""
++        self._req_states = req_states
+ 
+     def set_sampling_states(self, sampling_states) -> None:
+         self._req_top_p = sampling_states.top_p.gpu
+@@ -262,3 +294,48 @@
+         self._sample_path(candidate_ids, scores, num_reqs)
+         self._cache_draft_logits(candidate_ids, num_sample)
+         self.draft_tokens[:num_reqs].copy_(self._selector_tokens[:num_reqs])
++        self._apply_lookup(num_reqs, num_sample)
++
++    def _apply_lookup(self, num_reqs: int, num_sample: int) -> None:
++        """Override the drafted block with the continuation of an earlier occurrence of the
++        current suffix, where one exists (see dflash2/lookup.py). The draft distribution for
++        those positions becomes a point mass on the proposed token, which keeps vLLM's
++        rejection sampling exact."""
++        if not self._lookup or self._req_states is None:
++            return
++        tokens, match_len = suffix_lookup(
++            self._req_states.all_token_ids.gpu,
++            self._req_states.total_len.gpu,
++            self.sample_idx_mapping,
++            num_reqs,
++            self.num_speculative_steps,
++            idx_mapping_stride=self.num_speculative_steps,
++            nmax=self._lookup_nmax,
++            nmin=self._lookup_nmin,
++            search_max=self._lookup_search,
++            out_tokens=self._lookup_tokens[:num_reqs],
++            out_len=self._lookup_len[:num_reqs],
++        )
++        use = (match_len >= self._lookup_nmin).unsqueeze(1)
++        self.draft_tokens[:num_reqs].copy_(
++            torch.where(use, tokens.to(self.draft_tokens.dtype), self.draft_tokens[:num_reqs])
++        )
++        self._lookup_hits += use.sum()
++        draft_logits = self.draft_logits
++        assert draft_logits is not None
++        block_k = triton.next_power_of_2(self.selector_top_k)
++        _point_mass_draft_logits_kernel[(num_sample,)](
++            draft_logits,
++            self._cached_candidate_ids,
++            tokens,
++            tokens.stride(0),
++            match_len,
++            self.sample_idx_mapping,
++            draft_logits.stride(0),
++            draft_logits.stride(1),
++            self._lookup_nmin,
++            num_steps=self.num_speculative_steps,
++            top_k=self.selector_top_k,
++            BLOCK_K=block_k,
++            num_warps=1,
++        )
+--- a/v1/worker/gpu/model_runner.py
++++ b/v1/worker/gpu/model_runner.py
+@@ -244,6 +244,9 @@
+             device=self.device,
+             num_prefill_lookahead=num_prefill_lookahead,
+         )
++        if self.speculator is not None and hasattr(self.speculator, "set_req_states"):
++            # Lookup-augmented drafting reads the request token history.
++            self.speculator.set_req_states(self.req_states)
+         self.input_buffers = InputBuffers(
+             max_num_reqs=self.max_num_reqs,
+             max_num_tokens=self.max_num_tokens,
+--- /dev/null
++++ b/v1/worker/gpu/spec_decode/dflash2/lookup.py
+@@ -0,0 +1,162 @@
++"""Lookup-augmented block drafting (LABD).
++
++When the tokens the model just produced already occurred earlier in this request's own
++context, the continuation is sitting right there in the prompt: propose *that* instead of
++what the model drafter guessed. One Triton program per request finds the most recent
++occurrence of the longest suffix (NMIN..NMAX tokens) of the token history and returns the k
++tokens that followed it.
++
++The proposal stays lossless: the caller rewrites the draft distribution for the overridden
++positions to a point mass on the proposed token, which is a legal q for vLLM's rejection
++sampler (accept probability becomes p(x), and the residual (p - q)+ is computed from the
++same buffer), so the output distribution is unchanged. Greedy requests never read q at all.
++
++Cost is one pass over the request's history (an int32 UVA tensor vLLM already maintains),
++i.e. ~len(context) * 4 bytes read per request per decode step.
++"""
++
++import torch
++
++from vllm.triton_utils import tl, triton
++
++# Positions are packed into one int64 score as len * SCORE_STRIDE + end_index, so that
++# "longest match, then most recent" is a single max-reduction. max_model_len < SCORE_STRIDE.
++SCORE_STRIDE = tl.constexpr(1 << 32)
++
++
++@triton.jit
++def _suffix_lookup_kernel(
++    all_token_ids_ptr,
++    all_token_ids_stride,
++    total_len_ptr,
++    idx_mapping_ptr,
++    idx_mapping_stride,
++    out_tokens_ptr,
++    out_tokens_stride,
++    out_len_ptr,
++    search_max,
++    k: tl.constexpr,
++    NMAX: tl.constexpr,
++    NMIN: tl.constexpr,
++    BLOCK: tl.constexpr,
++    BLOCK_KT: tl.constexpr,
++):
++    req = tl.program_id(0)
++    req_state = tl.load(idx_mapping_ptr + req * idx_mapping_stride)
++    if req_state < 0:
++        return
++    tl.store(out_len_ptr + req, 0)
++    total_len = tl.load(total_len_ptr + req_state)
++    # Need NMIN history to match against and k tokens after the match.
++    if total_len < NMIN + k + 1:
++        return
++    base = all_token_ids_ptr + req_state.to(tl.int64) * all_token_ids_stride
++
++    # Candidate match ends run over [lo, hi): the suffix itself is excluded, and a match
++    # must be followed by k tokens that are still inside the history.
++    hi = total_len - 1 - k
++    lo = tl.maximum(NMIN - 1, total_len - search_max)
++    best = tl.full([], -1, tl.int64)
++    for start in range(lo, hi, BLOCK):
++        e = start + tl.arange(0, BLOCK)
++        alive = (e < hi) & (e >= lo)
++        mlen = tl.zeros([BLOCK], tl.int32)
++        for j in range(NMAX):
++            s_j = tl.load(base + total_len - 1 - j)  # newest-first suffix token
++            t_j = tl.load(base + e - j, mask=alive & ((e - j) >= 0), other=-1)
++            eq = alive & (t_j == s_j)
++            mlen = tl.where(eq, mlen + 1, mlen)
++            alive = eq
++        ok = mlen >= NMIN
++        score = tl.where(ok, mlen.to(tl.int64) * SCORE_STRIDE + e.to(tl.int64), -1)
++        best = tl.maximum(best, tl.max(score, axis=0))
++    if best < 0:
++        return
++    match_len = (best // SCORE_STRIDE).to(tl.int32)
++    end = (best % SCORE_STRIDE).to(tl.int32)
++    idx = tl.arange(0, BLOCK_KT)
++    kmask = idx < k
++    toks = tl.load(base + end + 1 + idx, mask=kmask, other=0)
++    tl.store(out_tokens_ptr + req * out_tokens_stride + idx, toks, mask=kmask)
++    tl.store(out_len_ptr + req, match_len)
++
++
++@triton.jit
++def _point_mass_draft_logits_kernel(
++    draft_logits_ptr,
++    cached_candidate_ptr,
++    tokens_ptr,
++    tokens_stride,
++    match_len_ptr,
++    req_state_ptr,
++    draft_logits_stride_0,
++    draft_logits_stride_1,
++    min_len,
++    num_steps: tl.constexpr,
++    top_k: tl.constexpr,
++    BLOCK_K: tl.constexpr,
++):
++    """Rewrite one (request, step) row of the sparse draft-logit cache to a point mass on the
++    looked-up token, keeping the cache's invariant that every finite entry of a row is listed
++    in `cached_candidate_ids` (so the next step erases it)."""
++    flat = tl.program_id(0)
++    req = flat // num_steps
++    step = flat % num_steps
++    req_state = tl.load(req_state_ptr + flat)
++    if req_state < 0:
++        return
++    if tl.load(match_len_ptr + req) < min_len:
++        return
++    offsets = tl.arange(0, BLOCK_K)
++    mask = offsets < top_k
++    cache_base = (req_state * num_steps + step) * top_k
++    logits_base = (
++        draft_logits_ptr + req_state * draft_logits_stride_0 + step * draft_logits_stride_1
++    )
++    old = tl.load(cached_candidate_ptr + cache_base + offsets, mask=mask)
++    tl.store(logits_base + old, -float("inf"), mask=mask)
++    token = tl.load(tokens_ptr + req * tokens_stride + step)
++    tl.store(logits_base + token, 0.0)
++    tl.store(cached_candidate_ptr + cache_base + offsets, token, mask=mask)
++
++
++def suffix_lookup(
++    all_token_ids: torch.Tensor,
++    total_len: torch.Tensor,
++    idx_mapping: torch.Tensor,
++    num_reqs: int,
++    k: int,
++    idx_mapping_stride: int = 1,
++    nmax: int = 12,
++    nmin: int = 6,
++    search_max: int = 1 << 30,
++    out_tokens: torch.Tensor | None = None,
++    out_len: torch.Tensor | None = None,
++) -> tuple[torch.Tensor, torch.Tensor]:
++    """Returns (tokens [num_reqs, k] int32, match_len [num_reqs] int32; 0 = no match).
++
++    idx_mapping maps batch position -> request-state index, read with idx_mapping_stride
++    (the DFlash speculators keep it as sample_idx_mapping, one entry per (request, step))."""
++    device = idx_mapping.device
++    if out_tokens is None:
++        out_tokens = torch.zeros((num_reqs, k), dtype=torch.int32, device=device)
++    if out_len is None:
++        out_len = torch.zeros(num_reqs, dtype=torch.int32, device=device)
++    _suffix_lookup_kernel[(num_reqs,)](
++        all_token_ids,
++        all_token_ids.stride(0),
++        total_len,
++        idx_mapping,
++        idx_mapping_stride,
++        out_tokens,
++        out_tokens.stride(0),
++        out_len,
++        search_max,
++        k=k,
++        NMAX=nmax,
++        NMIN=nmin,
++        BLOCK=1024,
++        BLOCK_KT=triton.next_power_of_2(k),
++        num_warps=4,
++    )
++    return out_tokens, out_len

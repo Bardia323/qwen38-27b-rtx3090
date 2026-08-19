@@ -132,7 +132,7 @@ exactly); it only moves acceptance, and the calibrated int4 keeps it.
 
 ## Why this isn't just `vllm serve`
 
-Seven things in this repo that stock vLLM doesn't give you:
+Nine things in this repo that stock vLLM doesn't give you:
 
 1. **Both embedding matrices requantized.** Qwen3.8-27B has untied embeddings,
    so the public W4A16 quants carry two separate 2.5 GB bf16 matrices (lm_head
@@ -197,6 +197,17 @@ Seven things in this repo that stock vLLM doesn't give you:
    `patches/vllm-pr50021-gdn-spec-bounds.patch` (bounds checks in the DeltaNet
    speculative-decode kernels; we hit the illegal-memory-access it fixes with
    several concurrent MTP requests).
+8. **Speculation that reads the context.** A block drafter sees a 2,048-token window; a
+   long-context assistant spends much of its output reproducing what it was given.
+   `patches/dflash2-lookup-drafting.patch` proposes the continuation of the most recent
+   earlier occurrence of what was just generated — from anywhere in the request's own
+   history — with a point-mass draft distribution so the verify stays exact. +29% tokens per
+   step on "reproduce every command" work, +5% on ordinary chat, 0.075 ms per step.
+9. **Prefix caching for a hybrid model, on purpose.** vLLM keeps it opt-in for
+   mamba/GDN hybrids; `PREFIX_CACHE=1` turns it on in both modes with the recurrent state
+   resumed from the last cached block boundary. Follow-up chat turns on a 24k document:
+   23 s → 1 s. 64 API requests sharing a 5.8k system prompt: 222 s → 17 s.
+
 
 ### What each step buys
 
@@ -300,6 +311,40 @@ size. What it took to make it pay on a 24 GB card, in order:
    Since the runner's profiled activation peak also swings ~1 GiB between starts,
    this mode pins the pool by bytes (`KV_MEM`, 5.2 GiB) rather than by
    utilization, and start-up is then deterministic (69,758 tokens twice over).
+
+### Drafting from the context (`LOOKUP=1`)
+
+The drafter reads a 2,048-token window. A long-context assistant spends much of its output
+*reproducing* things — quoting a document, listing commands it was shown, rewriting a
+paragraph while keeping the code — and those tokens are sitting verbatim in the prompt, tens
+of thousands of tokens beyond what the drafter can see. `patches/dflash2-lookup-drafting.patch`
+scans the request's own token history (the buffer vLLM already keeps) for the most recent
+occurrence of the longest suffix of what has been generated so far, and proposes the k tokens
+that followed it — one Triton program per request, 0.075 ms at 32k context, batch-size
+independent. It stays lossless: greedy verification never reads the draft distribution, and
+sampled requests get a point mass on the proposed token, which is a legal proposal for
+vLLM's rejection sampler (acceptance becomes p(x), residual computed from the same buffer).
+
+An offline study on real generations said 35% of decode positions have a 4-12 token match and
+4.28 of 7 proposed tokens are then correct; measured end to end on a 24k document it is worth
++29% tokens per step and +25% tok/s on "reproduce every command" work, +8% on "rewrite but
+keep the quotes", nothing on free-form prose, and +5% on the short-prompt C1 set — with step
+time unchanged and quality unchanged (perplexity 8.0926 vs 8.094, GSM8K 96.5%). Full table in
+[single-user/README.md](single-user/README.md).
+
+Pair it with `PREFIX_CACHE=1` (vLLM's hybrid prefix caching, opt-in upstream): a follow-up
+turn on a 24k-token document costs **~1 s instead of ~23 s** because the attention KV is
+reused and the recurrent state resumes from the last cached block boundary, for one extra
+state page per request (~16% of the KV pool). Prefill stops dominating a chat, and then
+drafting from the context is what makes the decode fast.
+
+`PREFIX_CACHE=1` works in **batch mode** too, and matters just as much there: 64 requests
+sharing one 5,820-token system prompt take 222 s without it and **16.9 s** with it (median
+latency 94.9 s → 8.0 s), for ~14% of the KV pool and no change on workloads without a shared
+prefix. If your API backend sends the same instructions with every request, this is the
+single biggest thing in this repo for you. (The other three changes on this page —
+lookup drafting, the KV-group fix and the V2 graph accounting — only fire on the DFlash2
+path and are inert in batch mode.)
 
 Its limits are memory- and window-shaped, not speed-shaped: each request holds
 1+7 recurrent-state slots (0.7 GB), so from 8 concurrent long generations MTP's
@@ -414,8 +459,8 @@ difference is gotcha 16 below.
   runs `batch/start_qwen.sh`. One GPU, so one at a time
   (`docker compose --profile single down` before `--profile batch up -d`).
 - Every start-script knob works from `.env`, which is passed straight into the
-  container: `CTX=long`, `KV=kvarn`, `SPEC=dflash2`, `MAX_LEN=`, `MAX_SEQS=`,
-  `SPEC_ATTN=0`, `EXTRA_ARGS=...` (`prepare` also fetches the DFlash2 drafter;
+  container: `CTX=long`, `KV=kvarn`, `SPEC=dflash2`, `PREFIX_CACHE=1`, `MAX_LEN=`,
+  `MAX_SEQS=`, `SPEC_ATTN=0`, `EXTRA_ARGS=...` (`prepare` also fetches the DFlash2 drafter;
   `DFLASH2=0` skips it). `PORT` (default 18020) and `MODELS_DIR` (default `./models`,
   so a venv install and the container can share one download) are read by
   compose itself.

@@ -111,9 +111,21 @@ if [ "$SPEC" = "dflash2" ]; then
   # If you tune GPU_UTIL instead, make the V2 runner count its CUDA graphs (~1.2-1.3 GiB
   # at these capture sizes) as well:
   export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
+  # Lookup-augmented drafting: when the model is reproducing something from its context,
+  # draft from the context instead of from the drafter (patches/dflash2-lookup-drafting.patch,
+  # 0.075 ms/step; +29% tokens/step on "repeat the commands" style work, neutral elsewhere).
+  export VLLM_DFLASH2_LOOKUP=${LOOKUP:-1}
 else
   SPEC_CFG="{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}"
   CG=${CG:-32}
+fi
+
+# PREFIX_CACHE=1: reuse the KV of a shared prompt prefix across requests, and resume the
+# recurrent (GDN) state from the last cached block boundary instead of re-running the prompt.
+# Turn-2+ of a chat with a 24k document goes from ~23 s to ~1 s; costs one extra state page
+# per request (~16% of the KV pool). Hybrid models keep this opt-in upstream.
+if [ "${PREFIX_CACHE:-0}" = "1" ]; then
+  EXTRA_ARGS="--enable-prefix-caching --mamba-cache-mode align ${EXTRA_ARGS}"
 fi
 
 export PATH="$REPO/venv/bin:$PATH"
