@@ -129,7 +129,10 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
 fi
 
 export PATH="$REPO/venv/bin:$PATH"
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Overridable: expandable_segments needs CUDA VMM, which WSL2's paravirt
+# driver rejects ("CUDA driver error: device not ready" during Marlin repack)
+# — set PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False in .env on WSL2.
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
 if [ -z "$VLLM_API_KEY" ] && [ -f "$REPO/api_key.txt" ]; then

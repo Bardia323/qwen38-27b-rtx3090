@@ -72,7 +72,8 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
 fi
 
 export PATH="$REPO/venv/bin:$PATH"
-export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+# Overridable for WSL2 (see single-user/start_qwen.sh).
+export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 # flashinfer's sampling.cu does not build with older system nvcc (12.0);
 # the attention kernels JIT fine. Remove this if you have a recent CUDA toolkit.
 export VLLM_USE_FLASHINFER_SAMPLER=0

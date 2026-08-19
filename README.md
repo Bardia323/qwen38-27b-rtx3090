@@ -494,7 +494,7 @@ signatures and earlier five-profile matrix are in [issue #1](../../issues/1).
 | `batch`, `KV=int4pth` | 437,414 tokens | 1,043.84 / 1,044.06 tok/s, C64 |
 | `batch`, `KV=kvarn` | 334,183 cold / 350,192 warm | 843.72 / 852.42 tok/s, C64 |
 
-Two WSL-specific memory behaviors are worth accounting for:
+Three WSL-specific memory behaviors are worth accounting for:
 
 1. **The ordinary batch default may fail vLLM's startup free-memory gate.**
    On an otherwise clean card, WSL reported 22.75/24.0 GiB free, less than
@@ -512,9 +512,15 @@ Two WSL-specific memory behaviors are worth accounting for:
    `EXTRA_ARGS` on later starts. Stress concurrent prefill or
    `prompt_logprobs` before promoting it. Do not copy a byte value from a
    different card or profile.
-
-The separate Marlin-repack allocator observation from issue #1 is not changed
-by this documentation PR; it may belong in vLLM rather than this recipe.
+3. **`expandable_segments` can crash Marlin repack on some driver/dxgkrnl
+   combinations.** Both start scripts default to
+   `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; its CUDA VMM calls
+   crashed the engine with `RuntimeError: CUDA driver error: device not
+   ready` inside `gptq_marlin_repack` on Windows driver 610.74 (WSL 2.1.5
+   and 2.7.12 alike — the `e81fa39` reproduction on driver 591.86 did not
+   hit this). The scripts respect a pre-set value, so put
+   `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:False` in `.env` (Docker)
+   or the environment (venv) if you see that signature.
 
 ## Gotchas
 
