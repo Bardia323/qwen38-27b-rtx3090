@@ -1,0 +1,67 @@
+# Qwen3.8-27B on one RTX 3090, containerized. See README "Docker".
+#
+#   docker compose --profile single up -d     # low latency: MTP speculative decoding
+#   docker compose --profile batch  up -d     # throughput
+#   docker compose run --rm prepare           # just download + requantize the model
+#   docker compose run --rm single verify     # verify.sh inside the container
+#
+# Knobs go in a .env file next to this file (never committed): VLLM_API_KEY=...,
+# and any of the start-script variables (CTX, KV, MAX_LEN, MAX_SEQS, GPU_UTIL,
+# SPEC_ATTN, DRAFT_TOKENS, EXTRA_ARGS, ...) — .env is passed straight into the
+# container. PORT and MODELS_DIR are read here: models live in ./models by default
+# (the same layout as the venv install, so both can share one download).
+# One GPU: run either "single" or "batch", not both.
+
+x-qwen: &qwen
+  image: qwen38-27b-3090:latest
+  build: .
+  ipc: host
+  env_file:
+    - path: .env
+      required: false
+  environment:
+    HOME: /cache
+  volumes:
+    - ${MODELS_DIR:-./models}:/app/models
+    - qwen-cache:/cache
+
+x-serve: &serve
+  <<: *qwen
+  ports:
+    - "${PORT:-18020}:${PORT:-18020}"
+  depends_on:
+    prepare:
+      condition: service_completed_successfully
+  deploy:
+    resources:
+      reservations:
+        devices:
+          - driver: nvidia
+            count: 1
+            capabilities: [gpu]
+  restart: unless-stopped
+  stop_grace_period: 30s
+  healthcheck:
+    test: ["CMD", "curl", "-sf", "http://127.0.0.1:${PORT:-18020}/health"]
+    interval: 30s
+    timeout: 5s
+    retries: 3
+    start_period: 900s   # first start: torch.compile + CUDA graphs + FlashInfer JIT
+
+services:
+  prepare:
+    <<: *qwen
+    command: prepare
+
+  single:
+    <<: *serve
+    profiles: [single]
+    command: single
+
+  batch:
+    <<: *serve
+    profiles: [batch]
+    command: batch
+
+volumes:
+  qwen-cache:

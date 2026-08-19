@@ -90,6 +90,13 @@ requantization, vLLM patches). Then:
 bash batch/start_qwen.sh
 ```
 
+Or in Docker (image build, model prep and the same knobs via `.env` — see the
+[Docker section](../README.md#docker)):
+
+```bash
+docker compose --profile batch up -d
+```
+
 Or as a service:
 
 ```bash

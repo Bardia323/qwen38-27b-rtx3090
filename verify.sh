@@ -6,28 +6,35 @@
 #
 #   bash verify.sh            # everything
 #   bash verify.sh --no-server
+#   bash verify.sh --install  # only the install (venv, vLLM, patches, KVarN): no GPU,
+#                             # model or server checks — what the Docker build runs
 # Exit code: 0 all PASS (WARNs allowed), 1 if anything FAILs.
+# PY=/path/to/python overrides the interpreter (default: this repo's venv).
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$HERE"
-NOSRV=0; [ "${1:-}" = "--no-server" ] && NOSRV=1
+NOSRV=0; INSTALL=0
+for a in "$@"; do case "$a" in --no-server) NOSRV=1;; --install) INSTALL=1; NOSRV=1;; esac; done
 FAILS=0
 ok()   { printf "  PASS  %s\n" "$1"; }
 warn() { printf "  WARN  %s\n" "$1"; }
 fail() { printf "  FAIL  %s\n" "$1"; FAILS=$((FAILS+1)); }
 MODEL=${MODEL:-$HERE/models/Qwen3.8-27B-W4A16-AutoRound}
-SP=$HERE/venv/lib/python3.12/site-packages/vllm
-PY=$HERE/venv/bin/python
+PY=${PY:-$HERE/venv/bin/python}
 
 echo "== environment"
-[ -x "$PY" ] && ok "venv at $HERE/venv" || { fail "no venv/bin/python (see README Setup)"; exit 1; }
+[ -x "$PY" ] && ok "python: $PY" || { fail "no $PY (see README Setup)"; exit 1; }
 VER=$($PY -c "import vllm; print(vllm.__version__)" 2>/dev/null)
 [ "$VER" = "0.27.1" ] && ok "vllm $VER" || warn "vllm ${VER:-missing} (patches were written against 0.27.1)"
+SP=$($PY -c "import vllm, os; print(os.path.dirname(vllm.__file__))" 2>/dev/null)
+[ -n "$SP" ] && [ -d "$SP" ] && ok "vllm package at $SP" || { fail "cannot import vllm with $PY"; exit 1; }
+if [ $INSTALL = 0 ]; then
 $PY - <<'EOF' 2>/dev/null || fail "torch cannot see a CUDA GPU"
 import torch; assert torch.cuda.is_available()
 p=torch.cuda.get_device_properties(0)
 print(f"  PASS  GPU: {p.name}, {p.total_memory/2**30:.1f} GiB, sm{p.major}{p.minor}, torch {torch.__version__}")
 EOF
 command -v nvidia-smi >/dev/null && { PL=$(nvidia-smi --query-gpu=power.limit --format=csv,noheader,nounits | head -1); ok "power limit ${PL} W (README numbers are at 250 W)"; }
+fi
 for t in triton flashinfer compressed_tensors; do $PY -c "import $t" 2>/dev/null && ok "python module $t" || fail "python module $t missing"; done
 
 echo "== vLLM patches (patches/*.patch)"
@@ -45,6 +52,7 @@ if [ -f "$SP/v1/attention/backends/kvarn_attn.py" ]; then
   else fail "KVarN modules present but kvarn-0.27.1.patch not applied (bash kvarn/install.sh)"; fi
 else warn "KVarN not installed (optional; bash kvarn/install.sh for 262k context)"; fi
 
+if [ $INSTALL = 0 ]; then
 echo "== model at $MODEL"
 if [ ! -f "$MODEL/config.json" ]; then fail "model not found (README Setup: hf download)"; else
 $PY - "$MODEL" <<'EOF'
@@ -82,7 +90,8 @@ if [ -d "$HERE/models/Qwen3.8-27B-W4A16-AutoRound-fast" ]; then ok "fast variant
 
 echo "== keys / units"
 [ -s api_key.txt ] || [ -n "${VLLM_API_KEY:-}" ] && ok "API key configured (api_key.txt or VLLM_API_KEY)" || fail "no api_key.txt (openssl rand -hex 24 > api_key.txt)"
-if systemctl --user is-active qwen-serving >/dev/null 2>&1; then ok "systemd user unit qwen-serving active"; else warn "qwen-serving unit not active (fine if you launch the scripts by hand)"; fi
+if [ -f /.dockerenv ]; then :; elif systemctl --user is-active qwen-serving >/dev/null 2>&1; then ok "systemd user unit qwen-serving active"; else warn "qwen-serving unit not active (fine if you launch the scripts by hand)"; fi
+fi  # INSTALL
 
 if [ $NOSRV = 0 ]; then
   echo "== live server (127.0.0.1:${PORT:-18020})"

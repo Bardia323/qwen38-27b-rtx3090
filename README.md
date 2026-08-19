@@ -234,7 +234,7 @@ memory system's ramp on 16-92 MB reads, not the kernel).
 
 You need: a 24 GB Ampere or newer NVIDIA card, a recent driver, Python 3.12,
 ~40 GB disk. Everything below is CPU-safe to run while the GPU does other
-things.
+things. (Or skip the venv and use the container: [Docker](#docker) below.)
 
 ```bash
 git clone https://github.com/syv-ai/qwen38-27b-rtx3090 ~/qwen-serving
@@ -298,6 +298,55 @@ then `bash bench/run_benchmarks.sh batch` or `... single` reproduces the
 tables in this README against the running server (`--prefill` and `--long`
 add the prefill matrix and the long-context rows), and
 `python bench/quality_battery.py <tag>` the perplexity / GSM8K rows.
+
+### Docker
+
+The same stack, frozen into an image: Python 3.12 venv, vLLM 0.27.1 pinned
+(torch 2.13 / cu130 / Triton 3.7.1), every patch in `patches/` applied and
+`verify.sh --install` run at build time, KVarN preinstalled. Host prerequisites:
+an NVIDIA driver that speaks CUDA 13 (≥ 580), Docker with the
+[NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)
+configured as a runtime. The 250 W power limit is a host setting
+(`sudo nvidia-smi -pl 250`), the container cannot set it.
+
+```bash
+git clone https://github.com/syv-ai/qwen38-27b-rtx3090 && cd qwen38-27b-rtx3090
+echo "VLLM_API_KEY=$(openssl rand -hex 24)" > .env   # all knobs live in .env (gitignored)
+docker compose --profile single up -d               # or --profile batch
+docker compose logs -f single
+```
+
+The first `up` builds the image (9.5 GB), then the `prepare` service downloads
+the model into `./models` and runs the same requantization scripts as above
+(CPU only, idempotent, ~20 GB + a few minutes; `FAST_VARIANT=0` in `.env`
+skips the ~1 GB fast-variant download), then the server starts. The first
+start also does the torch.compile / CUDA-graph / FlashInfer-JIT work (2–3
+minutes); that lands in the `qwen-cache` volume, so later starts take ~1
+minute. `docker compose ps` shows the healthcheck (`/health`, 15-minute start
+period). Measured in the container on the 3090: single-user 112.6 / 115.7 tok/s
+(e2e / decode, default sampling), batch 950 tok/s on the 128/512 × 64 row, the
+same KV pools as the venv install — no container tax; the only first-start
+difference is gotcha 16 below.
+
+- Modes are compose profiles: `single` runs `single-user/start_qwen.sh`, `batch`
+  runs `batch/start_qwen.sh`. One GPU, so one at a time
+  (`docker compose --profile single down` before `--profile batch up -d`).
+- Every start-script knob works from `.env`, which is passed straight into the
+  container: `CTX=long`, `KV=kvarn`, `MAX_LEN=`, `MAX_SEQS=`, `SPEC_ATTN=0`,
+  `EXTRA_ARGS=...`. `PORT` (default 18020) and `MODELS_DIR` (default `./models`,
+  so a venv install and the container can share one download) are read by
+  compose itself.
+- `docker compose run --rm single verify` runs `verify.sh` inside the container
+  (GPU, patches, model). The entrypoint runs `verify.sh --no-server` before every
+  start and refuses to serve on a FAIL (`VERIFY=0` skips that).
+- Files that `prepare` writes to `./models` are root-owned: the container runs
+  as root, like vLLM's own image.
+- The image carries an nvcc (CUDA "base" + `cuda-nvcc`, not the 8 GB "devel"
+  image) because FlashInfer JIT-compiles its fp8-KV attention kernel on first
+  use (batch mode, `CTX=long`) and Triton needs a C compiler for its launchers.
+- On WSL2 the batch default may fail vLLM's free-memory gate; put
+  `GPU_UTIL=0.93` in `.env` (see the WSL2 notes below, an independent
+  containerized reproduction that predates this compose file).
 
 ### WSL2 notes
 
@@ -412,6 +461,16 @@ Things that each cost us hours, in rough order of pain:
     size; a new env knob that changes it must be registered in `envs.py`
     (`patches/speed-knobs-envs.patch`) or you get `assert_size_stride ...
     expected size 328==82` from a cached artifact.
+16. **The very first start gets a smaller KV pool.** vLLM sizes the pool from
+    the peak memory of a profiling forward pass, and on a cold torch.compile
+    cache that pass also runs inductor's autotuning: batch mode profiles a
+    1.96 GiB activation peak instead of 1.09 GiB and comes up with 196k KV
+    tokens instead of 224k (`Maximum concurrency ... 1.31x` in the log instead
+    of 1.49x). Restart once after the cache is warm (venv: `~/.cache/vllm`,
+    Docker: the `qwen-cache` volume) and the pool is back to the README numbers.
+    (The WSL2 notes above pin it the other way round — record the cold-start
+    `--kv-cache-memory` recommendation and pass it via `EXTRA_ARGS` — if you
+    prefer the extra transient headroom to the extra KV pages.)
 
 ## 262k context: the KVarN KV cache
 

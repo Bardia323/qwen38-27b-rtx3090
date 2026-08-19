@@ -1,0 +1,10 @@
+# The stack every number in the READMEs was measured on. vllm==0.27.1 pins
+# torch 2.13.0 (cu130), triton 3.7.1 and flashinfer-python 0.6.16.post3 itself;
+# the rest is pinned to what the reference venv resolved to.
+vllm==0.27.1
+transformers==5.15.0
+tokenizers==0.22.2
+compressed-tensors==0.17.0
+huggingface_hub==1.27.0
+hf_transfer==0.1.9
+ninja==1.13.0

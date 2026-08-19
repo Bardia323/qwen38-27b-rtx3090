@@ -138,6 +138,13 @@ bash single-user/start_qwen.sh
 bash bench/run_benchmarks.sh single    # reproduces the tables above
 ```
 
+Or in Docker (image build, model prep and the same knobs via `.env` — see the
+[Docker section](../README.md#docker)):
+
+```bash
+docker compose --profile single up -d
+```
+
 Or as a service:
 
 ```bash
