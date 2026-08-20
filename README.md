@@ -12,6 +12,18 @@ API with key auth, and two ready-made configs depending on what you're doing:
 | reproducing its own context (quoting a document, applying an edit) | 46 tok/s | **381 tok/s** at 25k context — 15.0 tokens per verify step, drafted straight from the prompt (`SPEC=dflash2` + `DFLASH_TOKENS=15`) |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) with a verify block the context fills |
 
+![Stock vLLM against this repo, same card, same prompts](docs/media/demo.gif)
+
+<sub>Three prompts on one RTX 3090 at 250 W: a chat answer, a code answer, and
+reproducing a 25k-token document. Left is plain `vllm serve` with no speculative
+decoding; right is `SPEC=dflash2 DFLASH_TOKENS=15 PREFIX_CACHE=1`. Measured
+**47.4 → 86.6**, **47.2 → 241.2** and **42.5 → 379.0 tok/s**. There is one GPU, so
+the two configurations cannot run at once: each lane was recorded separately with
+per-token arrival times and replayed side by side at its real speed
+(`bench/demo_capture.py`, then `bench/demo_render.py`). Both lanes are greedy and
+end on identical text — which is the point, speculation changes the speed and not
+the output.</sub>
+
 Both modes share one install — the mode is just which launch script you run.
 Speculation wins below ~8 concurrent users, plain batching above. Numbers are
 `vllm bench serve` on an RTX 3090 at a 250 W power limit. If the card is yours
