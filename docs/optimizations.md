@@ -28,7 +28,7 @@ One line each; the rest of this page is the long version.
 8. **Speculation that reads the context** — when the model is reproducing
    something from its prompt, draft it from the prompt, and verify a longer
    block than the drafter can fill (`patches/dflash2-lookup-drafting.patch`):
-   **389 tok/s** reproducing a 25k-token document verbatim, against 259 for the
+   **381 tok/s** reproducing a 25k-token document verbatim, against 260 for the
    first version of this and 159 without it, still lossless.
 9. **Prefix caching for a hybrid model** — opt-in upstream; `PREFIX_CACHE=1`
    makes a follow-up chat turn on a 24k document cost ~1 s instead of ~23 s, and
@@ -106,7 +106,7 @@ One line each; the rest of this page is the long version.
    history — with a point-mass draft distribution so the verify stays exact. Because those
    tokens cost the drafter nothing, the verify block is no longer capped at the drafter's
    own (7 tokens), and the long block is only scheduled while the lookup is firing:
-   reproducing a document verbatim goes 7.83 → 15.6 tokens per step, 259 → 389 tok/s.
+   reproducing a document verbatim goes 7.83 → 15.0 tokens per step, 260 → 381 tok/s.
 9. **Prefix caching for a hybrid model, on purpose.** vLLM keeps it opt-in for
    mamba/GDN hybrids; `PREFIX_CACHE=1` turns it on in both modes with the recurrent state
    resumed from the last cached block boundary. Follow-up chat turns on a 24k document:
@@ -222,18 +222,18 @@ Measured at 25k context, greedy, against the same server with the previous versi
 
 | | no lookup | default (`DFLASH_TOKENS=7`) | `DFLASH_TOKENS=15` |
 |---|---|---|---|
-| reproduce the first 60 lines verbatim | 4.72 / 159 | 7.83 / 259 | **15.64 / 389** |
-| shorten this, keep the commands | 2.70 / 90 | 3.19 / 106 | 3.74 / 113 |
-| quote and explain | 3.01 / 101 | 3.21 / 107 | 3.10 / 94 |
-| reproduce every command | 4.62 / 153 | 5.23 / 172 | 4.85 / 138 |
-| free-form summary / Q&A | 2.15 / 72 | 2.08 / 69 | 2.14 / 67 |
-| C1, 8 short chat prompts | 3.22 / 126 | 3.33 / 130 | **3.59 / 141** |
+| reproduce the first 60 lines verbatim | 4.72 / 159 | 7.83 / 260 | **14.97 / 381** |
+| shorten this, keep the commands | 2.70 / 90 | 3.19 / 107 | **3.50 / 113** |
+| quote and explain | 3.01 / 101 | 3.21 / 107 | **3.35 / 110** |
+| reproduce every command | 4.62 / 153 | 5.23 / 173 | 5.32 / 166 |
+| free-form summary / Q&A | 2.15 / 72 | 2.08 / 69 | **2.13 / 71** / 2.01 / 67 |
+| C1, 8 short chat prompts | 3.22 / 126 | 3.33 / 131 | **3.42 / 133** |
 
-So the long block is worth **+50%** where the model reproduces its context and +9% on short
-prompts (where the extra verify positions are nearly free), and gives back 12-20% at 25k
-context on work that mixes prose with quoting. That is why it is a mode — `DFLASH_TOKENS=15`,
-for a coding assistant applying edits or a RAG front-end quoting sources — rather than the
-default. Quality is unchanged: GSM8K 96.5% (200 questions, greedy) with the lookup on, the
+So the long block is worth **+47%** where the model reproduces its context, and a few percent
+on most other work once it is only scheduled while a copy is actually running. It ships as a
+mode — `DFLASH_TOKENS=15`, for a coding assistant applying edits or a RAG front-end quoting
+sources — because it also costs 4 request slots instead of 8 and 56k of context instead of
+64k. Quality is unchanged: GSM8K 96.5% (200 questions, greedy) with the lookup on, the
 same as without it, and 7 of 9 long greedy prompts come back token-identical against the
 same server with `LOOKUP=0` (the two that differ are near-tie flips, gotcha 14).
 

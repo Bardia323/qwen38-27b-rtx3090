@@ -139,7 +139,10 @@ if [ "$SPEC" = "dflash2" ]; then
     MAX_SEQS=${MAX_SEQS:-4}
     MAX_LEN=${DFLASH_MAX_LEN:-57344}
     KV_MEM=${KV_MEM-5583457484}
-    export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1600}
+    # Decode graphs are captured for both block lengths (the drafter's and the full verify
+    # block), or the short step -- the common one -- runs piecewise and costs 8%. That is
+    # 1.8 GiB of graphs instead of 1.45.
+    export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1900}
   else
     MAX_LEN=${DFLASH_MAX_LEN:-65536}
     KV_MEM=${KV_MEM-5583457484}

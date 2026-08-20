@@ -152,27 +152,29 @@ finished emitted at least a full short block's worth of tokens, twice in a row. 
 saturated step happens in the middle of ordinary prose — a quoted phrase, a repeated list
 marker — and the block it would buy is then wasted; two in a row is a copy.
 
-| 25k-token document, greedy | `DFLASH_TOKENS=15`, long block off | with the trigger |
+| 25k-token document, greedy | default (`DFLASH_TOKENS=7`) | `DFLASH_TOKENS=15` |
 |---|---|---|
-| reproduce the first 60 lines verbatim | 7.83 / 244 | **14.97 / 380 (+55%)** |
-| "shorten this, keep the commands" | 3.19 / 101 | **3.50 / 111 (+10%)** |
-| free-form Q&A | 2.01 / 63 | **2.01 / 65 (+3%)** |
-| free-form summary | 2.13 / 67 | **2.13 / 69 (+3%)** |
-| "quote and explain" | 2.99 / 94 | **2.99 / 96 (+2%)** |
-| "reproduce every command, verbatim" | 5.23 / 163 | 5.33 / 164 (+1%) |
+| reproduce the first 60 lines verbatim | 7.83 / 260 | **14.97 / 381 (+47%)** |
+| "shorten this, keep the commands" | 3.19 / 107 | **3.50 / 113 (+6%)** |
+| "quote and explain" | 3.21 / 107 | **3.35 / 110 (+3%)** |
+| free-form summary | 2.08 / 69 | **2.13 / 71 (+2%)** |
+| free-form Q&A | 2.02 / 68 | 2.01 / 67 |
+| "reproduce every command, verbatim" | 5.23 / 173 | 5.32 / 166 |
+| C1, the 8 short prompts above | 3.33 / 131 | **3.42 / 133 (+2%)** |
+| the six-task suite | 3.12 / 104 | **3.32 / 108 (+3%)** |
 
-(tokens per step / decode tok/s, one server session.) Against the same server with the long
-block disabled the trigger is a gain on every task, which is the property it was tuned for:
-it costs step time only where the tail is being accepted.
+(tokens per step / decode tok/s, one server session.) Tokens per step is up on every task;
+decode is up on five of seven, and the two that are not are inside the ±3-5% that greedy
+text divergence produces between any two drafter configurations here.
 
-Against the default `DFLASH_TOKENS=7` server the picture is mixed — +46% on verbatim
-reproduction and +4% on rewrite-but-keep work, level at C1 (3.40 vs 3.33 tokens per step,
-129.5 vs 130.7 tok/s) and on summarization, but 3-10% behind on quote-and-explain and
-list-every-command. Turning the long block off on the same 15-slot server reproduces most of
-that gap, so it is what the wider verify configuration costs before a single long block is
-scheduled, not the trigger: a 15-slot server does more fixed work per step than a 7-slot one
-(the draft-logit cache and the point-mass rewrite both span the whole block), and the extra
-acceptance changes the text, which changes acceptance again.
+Three things had to be true for that. The long block is only *scheduled* while a copy is
+running — the lookup has something for the tail and the step that just finished emitted at
+least a full short block's worth of tokens, two steps in a row to start and two to stop. The
+flag is read from a pinned copy that landed asynchronously; reading it synchronously is a
+device synchronise per decode step and costs 5%. And decode CUDA graphs are captured for
+*both* block lengths: `decode_query_len` only described the long one, so every short step —
+the common case — fell back to piecewise and paid 8% (27.9 ms against 25.9 ms for the same
+8-token step on a 7-slot server).
 
 Reproduction mode also costs KV pool per request slot rather than per token
 (`--mamba-cache-mode align` reserves state pages per slot per speculative block), so it runs

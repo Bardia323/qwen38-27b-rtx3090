@@ -147,3 +147,10 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     `site-packages` with `rsync -a` can leave the `.pyc` newer than the `.py`, in which case
     the interpreter keeps running the old bytecode and every measurement lands on the
     previous revision. Delete `__pycache__` after installing patched files.
+27. **A shorter draft block than `num_speculative_tokens` loses the decode CUDA graphs.**
+    The V2 runner captures uniform-decode graphs at `decode_query_len = num_speculative_tokens
+    + 1` and dispatch requires an exact match, so scheduling the drafter's 8-token block on a
+    16-token server matches nothing and the step runs piecewise: 27.9 ms against 25.9 ms for
+    the same work, on every short step. `cudagraph_utils.py` already knows how to capture
+    several decode lengths (it does it for dynamic speculative decoding); the lookup patch
+    adds the drafter's block to that list. Costs 1.8 GiB of graphs instead of 1.45.
