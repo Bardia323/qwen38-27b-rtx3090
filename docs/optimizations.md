@@ -26,9 +26,10 @@ One line each; the rest of this page is the long version.
 7. **Tuned flags that are easy to get wrong**, plus vLLM PR #50021 vendored for
    an illegal memory access in the DeltaNet spec-decode kernels.
 8. **Speculation that reads the context** — when the model is reproducing
-   something from its prompt, draft it from the prompt
-   (`patches/dflash2-lookup-drafting.patch`): +29% tokens per step on quoting
-   and listing work, 0.075 ms per step, still lossless.
+   something from its prompt, draft it from the prompt, and verify a longer
+   block than the drafter can fill (`patches/dflash2-lookup-drafting.patch`):
+   **389 tok/s** reproducing a 25k-token document verbatim, against 259 for the
+   first version of this and 159 without it, still lossless.
 9. **Prefix caching for a hybrid model** — opt-in upstream; `PREFIX_CACHE=1`
    makes a follow-up chat turn on a 24k document cost ~1 s instead of ~23 s, and
    64 requests sharing a system prompt 17 s instead of 222 s.
@@ -102,8 +103,10 @@ One line each; the rest of this page is the long version.
    long-context assistant spends much of its output reproducing what it was given.
    `patches/dflash2-lookup-drafting.patch` proposes the continuation of the most recent
    earlier occurrence of what was just generated — from anywhere in the request's own
-   history — with a point-mass draft distribution so the verify stays exact. +29% tokens per
-   step on "reproduce every command" work, +5% on ordinary chat, 0.075 ms per step.
+   history — with a point-mass draft distribution so the verify stays exact. Because those
+   tokens cost the drafter nothing, the verify block is no longer capped at the drafter's
+   own (7 tokens), and the long block is only scheduled while the lookup is firing:
+   reproducing a document verbatim goes 7.83 → 15.6 tokens per step, 259 → 389 tok/s.
 9. **Prefix caching for a hybrid model, on purpose.** vLLM keeps it opt-in for
    mamba/GDN hybrids; `PREFIX_CACHE=1` turns it on in both modes with the recurrent state
    resumed from the last cached block boundary. Follow-up chat turns on a 24k document:
@@ -171,18 +174,63 @@ The drafter reads a 2,048-token window. A long-context assistant spends much of 
 paragraph while keeping the code — and those tokens are sitting verbatim in the prompt, tens
 of thousands of tokens beyond what the drafter can see. `patches/dflash2-lookup-drafting.patch`
 scans the request's own token history (the buffer vLLM already keeps) for the most recent
-occurrence of the longest suffix of what has been generated so far, and proposes the k tokens
-that followed it — one Triton program per request, 0.075 ms at 32k context, batch-size
-independent. It stays lossless: greedy verification never reads the draft distribution, and
-sampled requests get a point mass on the proposed token, which is a legal proposal for
-vLLM's rejection sampler (acceptance becomes p(x), residual computed from the same buffer).
+occurrence of the longest suffix of what has been generated so far, and proposes the tokens
+that followed it — one Triton program per request, batch-size independent, with an
+`NMIN`-token reject test before any candidate is extended. It stays lossless: greedy
+verification never reads the draft distribution, and every position the lookup filled gets a
+point mass on the proposed token, which is a legal proposal for vLLM's rejection sampler
+(acceptance becomes p(x), residual computed from the same buffer).
 
-An offline study on real generations said 35% of decode positions have a 4-12 token match and
-4.28 of 7 proposed tokens are then correct; measured end to end on a 24k document it is worth
-+29% tokens per step and +25% tok/s on "reproduce every command" work, +8% on "rewrite but
-keep the quotes", nothing on free-form prose, and +5% on the short-prompt C1 set — with step
-time unchanged and quality unchanged (perplexity 8.0926 vs 8.094, GSM8K 96.5%). Full table in
-[single-user/README.md](../single-user/README.md).
+Four things decide what that is worth.
+
+**The verify block no longer has to be the drafter's block.** `dflash_config.block_size` is a
+property of the checkpoint — 8 = one anchor plus the 7 mask tokens DFlash2 was trained for —
+and vLLM made it the target's verify length as well, so a verbatim copy could never exceed 8
+tokens per step. It sat on that ceiling: 7.83 of 8 accepted while reproducing a document's
+first 60 lines. The drafter now keeps its own block while the target verifies a longer one
+(`DFLASH_TOKENS`), and the positions past the drafter's block are filled from the context. They cost the drafter nothing — no extra mask tokens, no extra pass of its
+candidate head — which is the point: the context is a free source of drafts, the drafter is
+not.
+
+**The long block is only scheduled while the lookup is firing.** Each extra verify position
+costs about 1 ms of attention at 25k context, so the speculator reports per step how many of
+its proposals the scheduler should actually put up for verification: the drafter's 7
+normally, the whole block when the lookup has a match, decided from a pinned copy of the
+per-request match flags. vLLM only feeds that number back to the scheduler on the synchronous
+scheduling path, so this mode runs `--no-async-scheduling`; at batch 1 that costs under 1%.
+
+**The proposal is fused with the drafter's, not substituted for it.** A match of at least
+`VLLM_DFLASH2_LOOKUP_NSTRONG` (8) tokens is taken on its own; a shorter one only if the
+drafter independently proposed the same first `_AGREE` (2) tokens. Two independent sources
+agreeing is the cheap confidence signal — the drafter looked at the hidden state, the lookup
+looked at the text — and it is what stops a coincidental 6-token match from costing
+acceptance on prose, which the all-or-nothing first version did.
+
+**A match may overlap the suffix it matched**, so a repeating pattern (a list marker, an
+indent, a fence) is proposed from its own period instead of missed.
+
+Measured at 25k context, greedy, against the same server with the previous version
+(tokens per step / decode tok/s):
+
+| | no lookup | default (`DFLASH_TOKENS=7`) | `DFLASH_TOKENS=15` |
+|---|---|---|---|
+| reproduce the first 60 lines verbatim | 4.72 / 159 | 7.83 / 259 | **15.64 / 389** |
+| shorten this, keep the commands | 2.70 / 90 | 3.19 / 106 | 3.74 / 113 |
+| quote and explain | 3.01 / 101 | 3.21 / 107 | 3.10 / 94 |
+| reproduce every command | 4.62 / 153 | 5.23 / 172 | 4.85 / 138 |
+| free-form summary / Q&A | 2.15 / 72 | 2.08 / 69 | 2.14 / 67 |
+| C1, 8 short chat prompts | 3.22 / 126 | 3.33 / 130 | **3.59 / 141** |
+
+So the long block is worth **+50%** where the model reproduces its context and +9% on short
+prompts (where the extra verify positions are nearly free), and gives back 12-20% at 25k
+context on work that mixes prose with quoting. That is why it is a mode — `DFLASH_TOKENS=15`,
+for a coding assistant applying edits or a RAG front-end quoting sources — rather than the
+default. Quality is unchanged: GSM8K 96.5% (200 questions, greedy) with the lookup on, the
+same as without it, and 7 of 9 long greedy prompts come back token-identical against the
+same server with `LOOKUP=0` (the two that differ are near-tie flips, gotcha 14).
+
+The mode also costs 4 request slots instead of 8 and 56k context instead of 64k, because
+`--mamba-cache-mode align` reserves recurrent-state pages per slot per speculative block.
 
 Pair it with `PREFIX_CACHE=1` (vLLM's hybrid prefix caching, opt-in upstream): a follow-up
 turn on a 24k-token document costs **~1 s instead of ~23 s** because the attention KV is

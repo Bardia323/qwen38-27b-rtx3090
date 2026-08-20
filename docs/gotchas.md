@@ -62,7 +62,10 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     SMs, 57 µs per layer at 1.5k context and 1.3 ms at 16k. vLLM's Triton
     unified attention has the same restriction (`max_seqlen_q > 1` → 2-D
     kernel). `patches/spec-decode-attn.patch` (`VLLM_SPEC_DECODE_ATTN=1`, bf16
-    KV only) is a 170-line Triton fix.
+    KV only) is a 180-line Triton fix. Watch its query cap: the kernel used to
+    handle at most `BLOCK_M / (heads per kv head)` = 10 query tokens and fall
+    back silently past that, which doubled the step at 25k context the moment
+    the verify block grew to 16. It now tiles the query rows instead.
 14. **Greedy is not deterministic across drafter configs.** The target rounds
     differently when it verifies 5 tokens vs 1, so a different drafter changes
     the generated text at near-ties and the 8-prompt acceptance numbers move
@@ -105,3 +108,25 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     concurrent — but the extra per-layer scratch no longer fits batch mode's 0.972: the
     engine dies with `torch.OutOfMemoryError` inside `chunk_fwd_o` once ~17 requests are
     resident, which reads as every request returning 500 while `/health` still answers.
+20. **A Triton kernel's scratch buffers may not grow after CUDA graph capture.** The
+    split-KV verify attention sizes its partial buffers from the longest query block it has
+    been asked for. Once the block got longer than the drafter's — and once a small prefill
+    chunk could land on the same kernel — that "longest so far" changed mid-run, the buffers
+    were reallocated, and the captured decode graph went on reading the freed ones:
+    `CUDA error: an illegal memory access was encountered`, a few hundred tokens into the
+    first request. `VLLM_SPEC_DECODE_ATTN_QMAX` (set by `single-user/start_qwen.sh` from
+    `DFLASH_TOKENS`) fixes the size at startup instead.
+21. **Async scheduling pins the number of speculative tokens.** vLLM only feeds draft token
+    ids — and therefore the *count* the worker wants verified — back to the scheduler on the
+    synchronous path (`EngineCore.post_step`). With async scheduling on, every decode step is
+    padded to `num_speculative_tokens` and a worker asking for fewer is ignored, silently.
+    Adaptive block length (`LOOKUP=1` with `DFLASH_TOKENS > 7`) needs `ASYNC_SCHED=0`; at
+    batch 1 that costs under 1%.
+22. **`--async-scheduling` is already the default in 0.27.1.** The flag exists and passing it
+    changes nothing; `--no-async-scheduling` is what turns it off. Two hours of "the adaptive
+    block isn't working" was this.
+23. **A longer verify block costs KV pool per request slot, not per token.**
+    `--mamba-cache-mode align` reserves `2 + num_speculative_blocks` recurrent-state pages
+    per slot, so `DFLASH_TOKENS=31` with 8 slots wants 5.3 GiB before a single token of
+    context and refuses to start. Single-user mode drops to 4 slots when the block is long,
+    which is what makes the long block affordable at all.

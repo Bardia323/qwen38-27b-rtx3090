@@ -1,5 +1,6 @@
 """Correctness + microbenchmark of the split-KV spec-decode attention kernel
-(patches/spec-decode-attn.patch) against vLLM's FlashAttention-2 call.
+(patches/spec-decode-attn.patch) against vLLM's FlashAttention-2 call, including the
+long query blocks lookup-augmented drafting asks for (16 and 32 tokens per request).
 Run inside the vLLM venv on the GPU after applying the patch:
   venv/bin/python bench/test_spec_decode_attn.py"""
 import sys, os, time, math
@@ -60,9 +61,11 @@ def bench(fn, iters=200):
     return e0.elapsed_time(e1) / iters * 1000  # us
 
 
-att = SpecDecodeAttention(max_num_reqs=64, num_heads=Hq, head_dim=D, device=dev)
+att = SpecDecodeAttention(max_num_reqs=64, num_heads=Hq, head_dim=D, device=dev, qmax=64)
 print("correctness")
-for kv_lens, q_len in [([1500], 5), ([37, 1000, 4321], 5), ([16000], 1), ([700, 8], 8), ([432], 5), ([433, 431], 3)]:
+for kv_lens, q_len in [([1500], 5), ([37, 1000, 4321], 5), ([16000], 1), ([700, 8], 8), ([432], 5),
+                       ([433, 431], 3), ([1500], 16), ([2000, 300], 16), ([9000], 21), ([1500], 22),
+                       ([25000], 32), ([600, 4000], 32), ([1000], 64)]:
     q, kc, vc, bt, cu, seqused = make(kv_lens, q_len)
     out = torch.empty_like(q)
     att.run(q, kc, vc, out, cu, seqused, bt, scale, len(kv_lens), q_len)
@@ -73,13 +76,14 @@ for kv_lens, q_len in [([1500], 5), ([37, 1000, 4321], 5), ([16000], 1), ([700, 
     err = (out.float() - r).abs().max().item(); err_fa = (fa.float() - r).abs().max().item()
     print(f"  kv={kv_lens} q={q_len}: max|ours-ref|={err:.4f}  max|FA-ref|={err_fa:.4f}  {'OK' if err < 0.05 else 'FAIL'}")
 
-print("timing (us) q_len=5, batch=1 / batch=4")
-for L in [512, 1500, 4000, 16000, 60000]:
-    for B in [1, 4]:
-        kv_lens = [L] * B
-        q, kc, vc, bt, cu, seqused = make(kv_lens, 5)
+print("timing (us) per attention layer, batch=1")
+print(f"  {'kv':>7s} {'q_len':>5s} {'ours':>8s} {'FA2':>8s}")
+for L in [1500, 4000, 25000, 60000]:
+    for Q in [8, 16, 32]:
+        kv_lens = [L]
+        q, kc, vc, bt, cu, seqused = make(kv_lens, Q)
         out = torch.empty_like(q); fa = torch.empty_like(q)
-        t_ours = bench(lambda: att.run(q, kc, vc, out, cu, seqused, bt, scale, B, 5))
-        t_fa = bench(lambda: flash_attn_varlen_func(q=q, k=kc, v=vc, out=fa, cu_seqlens_q=cu, max_seqlen_q=5, seqused_k=seqused,
-                                                    max_seqlen_k=L, softmax_scale=scale, causal=True, block_table=bt, fa_version=2))
-        print(f"  kv={L:6d} B={B}: ours {t_ours:7.1f}  FA2 {t_fa:7.1f}")
+        t_ours = bench(lambda: att.run(q, kc, vc, out, cu, seqused, bt, scale, 1, Q), iters=50)
+        t_fa = bench(lambda: flash_attn_varlen_func(q=q, k=kc, v=vc, out=fa, cu_seqlens_q=cu, max_seqlen_q=Q, seqused_k=seqused,
+                                                    max_seqlen_k=L, softmax_scale=scale, causal=True, block_table=bt, fa_version=2), iters=50)
+        print(f"  {L:7d} {Q:5d} {t_ours:8.1f} {t_fa:8.1f}")

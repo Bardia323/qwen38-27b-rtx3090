@@ -45,7 +45,7 @@ if [ -z "$MODEL" ] && [ -d "$REPO/models/Qwen3.8-27B-W4A16-AutoRound-fast" ]; th
 fi
 MODEL=${MODEL:-$REPO/models/Qwen3.8-27B-W4A16-AutoRound}
 PORT=${PORT:-18020}
-MAX_SEQS=${MAX_SEQS:-8}
+MAX_SEQS=${MAX_SEQS:-}
 # 0.93 here, NOT batch mode's 0.972: the DeltaNet workspace in the MTP decode
 # path allocates beyond the startup memory profile (docs/gotchas.md, gotcha 4).
 GPU_UTIL=${GPU_UTIL:-0.93}
@@ -92,11 +92,34 @@ if [ "$SPEC" = "dflash2" ]; then
     done
   fi
   [ -n "$DRAFT" ] || { echo "SPEC=dflash2 needs the drafter: venv/bin/python fetch_dflash2.py" >&2; exit 1; }
-  # DFLASH_TOKENS (not DRAFT_TOKENS): 7 = the block size the drafter was trained with (1 + 7)
+  # Lookup-augmented drafting: when the model is reproducing something from its context,
+  # draft from the context instead of from the drafter
+  # (patches/dflash2-lookup-drafting.patch).
+  export VLLM_DFLASH2_LOOKUP=${LOOKUP:-1}
+  # DFLASH_TOKENS is the *verify* block, which no longer has to equal the drafter's: the
+  # DFlash2 checkpoint always proposes the 7 tokens it was trained for, and any position
+  # past that is filled from the request's own context, costing the drafter nothing. The
+  # block length is adaptive -- the long block is only scheduled while the lookup is
+  # actually firing -- so ordinary steps still verify 8 tokens.
+  #
+  # DFLASH_TOKENS=15 is "reproduction mode": +50% where the model reproduces its context
+  # (388 vs 259 tok/s reproducing a document verbatim) and +9% on the short-prompt C1 set,
+  # against 3-20% on long-context work that mixes prose with quoting, 4 request slots
+  # instead of 8 and 56k of context instead of 64k. Worth setting for a coding assistant
+  # applying edits or a RAG front-end quoting sources; the default stays 7.
   DRAFT_TOKENS=${DFLASH_TOKENS:-7}
   SPEC_CFG="{\"method\":\"dflash\",\"model\":\"$DRAFT\",\"num_speculative_tokens\":$DRAFT_TOKENS}"
-  # The V2 model runner captures decode graphs in multiples of k+1 tokens: cover MAX_SEQS requests.
-  CG=${CG:-$((MAX_SEQS * (DRAFT_TOKENS + 1)))}
+  # The split-KV verify attention (patches/spec-decode-attn.patch) sizes its partial
+  # buffers once for the longest query block it will see -- a captured CUDA graph holds
+  # their addresses, so they must not be grown later.
+  export VLLM_SPEC_DECODE_ATTN_QMAX=${VLLM_SPEC_DECODE_ATTN_QMAX:-$((DRAFT_TOKENS + 1))}
+  if [ "$VLLM_DFLASH2_LOOKUP" = "1" ] && [ "$DRAFT_TOKENS" -gt 7 ]; then
+    # Adaptive block length means the worker tells the scheduler how many draft tokens to
+    # put up for verification next step, and vLLM only feeds that back on the synchronous
+    # scheduling path (async scheduling pads every decode step to num_speculative_tokens).
+    # Measured cost of losing async scheduling at batch 1: under 1%.
+    ASYNC_SCHED=${ASYNC_SCHED:-0}
+  fi
   # Memory: patches/hybrid-kv-groups-v2-cudagraph.patch stops the drafter's 5
   # sliding-window layers from padding the target's attention/GDN layers (78 instead of
   # 105 KB of pool per token), which is what makes 64k reachable here. The V2 runner's
@@ -105,17 +128,31 @@ if [ "$SPEC" = "dflash2" ]; then
   # leaving ~1.1 GiB for transients (the same margin MTP mode runs with). Soak-tested
   # with a 60k prompt, 4x16k concurrent and 8x4k generations. Lower it if you also run
   # something else on the card; KV_MEM= (empty) falls back to GPU_UTIL.
-  MAX_LEN=${DFLASH_MAX_LEN:-65536}
-  KV_MEM=${KV_MEM-5583457484}
+  #
+  # A longer verify block costs pool twice: bigger CUDA graphs, and one aligned recurrent
+  # state page per request per speculative block. MAX_SEQS is what that scales with, so
+  # single-user mode keeps 4 slots when the block is long.
+  if [ "$DRAFT_TOKENS" -gt 7 ]; then
+    # 4 slots and 56k instead of 8 and 64k: the aligned state pages and the bigger decode
+    # graphs are what the long block costs, and this is where they still fit next to the
+    # 5.2 GiB pool (57,669 tokens). DFLASH_TOKENS=7 gets 8 slots and 64k back.
+    MAX_SEQS=${MAX_SEQS:-4}
+    MAX_LEN=${DFLASH_MAX_LEN:-57344}
+    KV_MEM=${KV_MEM-5583457484}
+    export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1600}
+  else
+    MAX_LEN=${DFLASH_MAX_LEN:-65536}
+    KV_MEM=${KV_MEM-5583457484}
+    # If you tune GPU_UTIL instead, make the V2 runner count its CUDA graphs (~1.2-1.3 GiB
+    # at these capture sizes) as well:
+    export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
+  fi
+  MAX_SEQS=${MAX_SEQS:-8}
+  # The V2 model runner captures decode graphs in multiples of k+1 tokens: cover MAX_SEQS requests.
+  CG=${CG:-$((MAX_SEQS * (DRAFT_TOKENS + 1)))}
   [ -n "$KV_MEM" ] && EXTRA_ARGS="--kv-cache-memory=$KV_MEM ${EXTRA_ARGS}"
-  # If you tune GPU_UTIL instead, make the V2 runner count its CUDA graphs (~1.2-1.3 GiB
-  # at these capture sizes) as well:
-  export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
-  # Lookup-augmented drafting: when the model is reproducing something from its context,
-  # draft from the context instead of from the drafter (patches/dflash2-lookup-drafting.patch,
-  # 0.075 ms/step; +29% tokens/step on "repeat the commands" style work, neutral elsewhere).
-  export VLLM_DFLASH2_LOOKUP=${LOOKUP:-1}
 else
+  MAX_SEQS=${MAX_SEQS:-8}
   SPEC_CFG="{\"method\":\"mtp\",\"num_speculative_tokens\":$DRAFT_TOKENS,\"draft_sample_method\":\"${DRAFT_SAMPLE:-probabilistic}\"}"
   CG=${CG:-32}
 fi
@@ -127,6 +164,12 @@ fi
 if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   EXTRA_ARGS="--enable-prefix-caching --mamba-cache-mode align ${EXTRA_ARGS}"
 fi
+
+# ASYNC_SCHED=0 (set above for a long DFlash2 verify block) runs the scheduler
+# synchronously, which is the only path on which vLLM lets the worker choose how many draft
+# tokens to put up for verification. Note --async-scheduling is already the default in
+# 0.27.1: --no-async-scheduling is what turns it off.
+ASYNC_ARGS=$([ "${ASYNC_SCHED:-1}" = 1 ] && echo --async-scheduling || echo --no-async-scheduling)
 
 export PATH="$REPO/venv/bin:$PATH"
 # Overridable: expandable_segments needs CUDA VMM, which WSL2's paravirt
@@ -149,7 +192,7 @@ exec venv/bin/vllm serve "$MODEL" \
   --language-model-only \
   $ATTN_ARGS \
   --mamba-ssm-cache-dtype float16 \
-  --async-scheduling \
+  ${ASYNC_ARGS} \
   --max-num-batched-tokens 2048 \
   --speculative-config "$SPEC_CFG" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \

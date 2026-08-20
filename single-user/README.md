@@ -92,9 +92,9 @@ decode rate is higher at every cohort. Where it is *not* the better choice:
   against MTP's 2.6-3.0, and the drafter's own prefill adds ~15% to TTFT; end to
   end the two are within 5-10% there, MTP ahead. Up to ~8k tokens of context,
   which is most single-user traffic, DFlash2 wins.
-- **Context length**: 64k, same as MTP mode, but the pool is pinned by bytes
-  (`KV_MEM`, 5.2 GiB → 69,758 tokens = 1.06× at 65,536) instead of by
-  `GPU_UTIL`: `patches/hybrid-kv-groups-v2-cudagraph.patch` stops the drafter's
+- **Context length**: 64k (69,758 tokens of pool, 8 request slots), or 56k and 4 slots
+  in reproduction mode (`DFLASH_TOKENS=15`). Either way the pool is pinned by bytes
+  (`KV_MEM`, 5.2 GiB) instead of by `GPU_UTIL`: `patches/hybrid-kv-groups-v2-cudagraph.patch` stops the drafter's
   5 sliding-window layers from padding the target's attention/GDN layers (105 →
   78 KB of pool per token; without it this mode caps out at ~40k), and the V2
   runner's profiled activation peak swings ~1 GiB between starts, which makes a
@@ -130,25 +130,49 @@ unrelated one-shot prompts and want the pool.
 **Lookup-augmented drafting** (`LOOKUP=1`, on by default for `SPEC=dflash2`) fixes the other
 half. With prefill nearly free, long-context chat is decode-bound, and that is exactly where
 the block drafter is weakest: it sees a 2,048-token window, so when the model quotes or
-reproduces part of a 24k document, the drafter is guessing at text that is sitting verbatim
+reproduces part of a 25k document, the drafter is guessing at text that is sitting verbatim
 in the prompt. `patches/dflash2-lookup-drafting.patch` scans the request's own token history
-for the most recent occurrence of the longest suffix of what has been generated (6-12 tokens)
-and proposes the k tokens that followed it. Lossless: greedy never reads the draft
-distribution, and sampling requests get a point mass on the proposed token, which is a legal
+for the most recent occurrence of the longest suffix of what has been generated and proposes
+the tokens that followed it.
+
+Those tokens cost the drafter nothing, which is why the verify block no longer has to be
+the drafter's block. `DFLASH_TOKENS=15` — *reproduction mode* — has the target verify 16
+tokens per step while the DFlash2 checkpoint keeps drafting the 7 it was trained for, and
+the lookup fills the rest. That ceiling was binding: reproducing a document's first 60 lines
+accepted 7.83 of 8 drafts per step, so the copy ran at the block size, not at what the
+context could support. The long block is only *scheduled* while the lookup is firing — each
+extra verify position costs about 1 ms of attention at 25k context — so ordinary steps still
+verify 8 tokens. Lossless either way: greedy never reads the draft distribution, and every
+position the lookup filled gets a point mass on the proposed token, which is a legal
 proposal for the rejection sampler.
 
-| 24k-token document, greedy | tokens/step off → on | e2e off → on |
-|---|---|---|
-| "reproduce every command, verbatim" | 3.60 → **4.65** | 105 → **131 tok/s** |
-| "shorten this, keep the commands" | 2.69 → 2.91 | 82 → 87 tok/s |
-| "quote and explain" | 2.16 → 2.11 | 67 → 65 tok/s |
-| free-form summary / Q&A | 2.31 → 2.30 / 2.02 → 2.01 | unchanged |
-| C1, the 8 short prompts above | 3.13-3.23 → **3.32-3.41** | 118-122 → **125-127 tok/s** |
+| 25k-token document, greedy | no lookup | default (`DFLASH_TOKENS=7`) | `DFLASH_TOKENS=15` |
+|---|---|---|---|
+| reproduce the first 60 lines verbatim | 4.72 / 159 | 7.83 / 259 | **15.64 / 389** |
+| "shorten this, keep the commands" | 2.70 / 90 | 3.19 / 106 | **3.74 / 113** |
+| "quote and explain" | 3.01 / 101 | 3.21 / 107 | 3.10 / 94 |
+| "reproduce every command, verbatim" | 4.62 / 153 | 5.23 / 172 | 4.85 / 138 |
+| free-form summary / Q&A | 2.15 / 72, 1.98 / 66 | 2.08 / 69, 2.02 / 67 | 2.14 / 67, 2.01 / 63 |
+| C1, the 8 short prompts above | 3.22 / 126 | 3.33 / 130 | **3.59 / 141** |
 
-The cost is 0.075 ms per step at 32k context, batch size independent, and step time is
-unchanged at 26.4 ms. Perplexity 8.0926 (vs 8.094) and GSM8K 96.5% (vs 96.0%) confirm the
-verify stayed exact. `VLLM_DFLASH2_LOOKUP_NMIN` (6) trades recall for precision: 10 is
-slightly more conservative and slightly slower; `LOOKUP=0` turns it off.
+(tokens per step / decode tok/s, one server session so the columns are comparable.)
+Verbatim reproduction is the case the long block exists for: **+50%**, and +9% on the short
+C1 prompts where the extra verify positions are nearly free. It is not free at 25k context
+on work that mixes prose with quoting — "quote and explain" gives back 12%, "list every
+command" 20% — which is why 7 stays the default and 15 is a mode you turn on for a coding
+assistant applying edits, or a RAG front-end quoting its sources.
+
+Reproduction mode also costs KV pool per request slot rather than per token
+(`--mamba-cache-mode align` reserves state pages per slot per speculative block), so it runs
+4 slots and 56k of context instead of 8 and 64k.
+
+Quality is unchanged: GSM8K 96.5% (200 questions, greedy) with the lookup on, the same as
+without it. Greedy *text* matches on 7 of 9 long prompts against the same server with
+`LOOKUP=0`; the two that differ are near-tie flips of the kind any drafter change produces
+here (the block is one chunk through the recurrent layers, so changing what is in it changes
+the last bits of the logits — gotcha 14), not a change of distribution: the lookup's
+positions carry a point mass, which is a legal proposal for the rejection sampler, and
+greedy verification never reads the draft distribution at all.
 
 The same server measured on the random-token protocol used by
 [ninfer-3090](https://github.com/Don-Chad/ninfer-3090) (256 random tokens in,
@@ -266,8 +290,8 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 | `MODEL` | `models/Qwen3.8-27B-W4A16-AutoRound-fast` if present, else the base dir | the fast variant (`fetch_fast_variant.py`) is +15% |
 | `CTX` | `fast` | `fast`: bf16 KV / FlashAttention / 64k / 4 drafts / split-KV attention. `long`: fp8 KV / FlashInfer / 150k / 3 drafts, ~15% slower at C1, faster from C4 up. `huge`: KVarN 4/2-bit KV / 200k / 3 drafts (needs `bash kvarn/install.sh`; docs/long-context.md) |
 | `PREFIX_CACHE` | 0 | 1 = reuse a shared prompt prefix across requests (`--enable-prefix-caching --mamba-cache-mode align`): 20x faster follow-up turns, ~16% smaller KV pool |
-| `LOOKUP` | 1 (`SPEC=dflash2`) | draft from the request's own context when it repeats itself (`patches/dflash2-lookup-drafting.patch`); `VLLM_DFLASH2_LOOKUP_NMIN` (6) sets the shortest suffix that may override the drafter |
-| `SPEC` | `mtp` | `dflash2`: the DFlash2 block drafter (`fetch_dflash2.py`; `CTX=fast` only, V2 model runner, 64k). `DRAFT` overrides the drafter dir, `DFLASH_TOKENS` (7) the block, `DFLASH_MAX_LEN` (65536) the context, `KV_MEM` (5583457484 = 5.2 GiB) pins the KV pool — set `KV_MEM=` to size it from `GPU_UTIL` instead; `VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` disables the proposal truncation, `VLLM_DFLASH2_TORCH_TOPK=1` avoids the FlashInfer top-k JIT |
+| `LOOKUP` | 1 (`SPEC=dflash2`) | draft from the request's own context when it repeats itself (`patches/dflash2-lookup-drafting.patch`), and fill the verify positions the drafter's block does not reach. `VLLM_DFLASH2_LOOKUP_NMIN` (4) is the shortest suffix that may match, `_NMAX` (32) the longest, `_NSTRONG` (8) the match length trusted on its own, `_AGREE` (2) how many tokens the drafter must independently agree on for a shorter match to be taken, `_ADAPTIVE` (1 = ask the scheduler for the long block only while the lookup is firing, 0 = always long) |
+| `SPEC` | `mtp` | `dflash2`: the DFlash2 block drafter (`fetch_dflash2.py`; `CTX=fast` only, V2 model runner). `DRAFT` overrides the drafter dir, `DFLASH_TOKENS` (7) the *verify* block — the drafter always proposes the 7 it was trained for, and 15 here is reproduction mode (4 request slots, 56k context) — `DFLASH_MAX_LEN` (65536, or 57344 at `DFLASH_TOKENS=15`) the context, `KV_MEM` (5583457484 = 5.2 GiB) pins the KV pool — set `KV_MEM=` to size it from `GPU_UTIL` instead; `VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` disables the proposal truncation, `VLLM_DFLASH2_TORCH_TOPK=1` avoids the FlashInfer top-k JIT |
 | `DRAFT_TOKENS` | 4 (3 for `CTX=long`/`huge`) | speculative depth; 5 and 6 are slower |
 | `SPEC_ATTN` | 1 (`CTX=fast` only) | split-KV Triton attention for the verify step (`patches/spec-decode-attn.patch`); 0 = FlashAttention-2 |
 | `DRAFT_SAMPLE` | `probabilistic` | `greedy` drafts: same speed at T=0, ~15% slower at T>0 |
