@@ -312,6 +312,20 @@ SPEC=dflash2 bash single-user/start_qwen.sh     # DFlash2 (64k context, +10-15% 
 bash bench/run_benchmarks.sh single             # reproduces the tables above
 ```
 
+If you are the only person on the card, this is the fastest configuration here —
+the block drafter, a verify block the context fills, and the document you
+already sent kept across turns:
+
+```bash
+SPEC=dflash2 DFLASH_TOKENS=15 PREFIX_CACHE=1 bash single-user/start_qwen.sh
+```
+
+133 tok/s greedy on short prompts, 382 where the answer reproduces the prompt,
+0.56 s TTFT on a follow-up turn against a 25k-token document instead of 22.4 s.
+It runs 4 request slots and 56k of context instead of 8 and 64k, so it is a
+single-user setting in the literal sense; `bench/labd_bench.py` measures it and
+`bench/labd_soak.py` is the check that it stays reproducible under a batch.
+
 Or in Docker (image build, model prep and the same knobs via `.env` — see the
 [docs/docker.md](../docs/docker.md)):
 

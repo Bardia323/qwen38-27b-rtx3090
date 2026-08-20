@@ -14,7 +14,9 @@ API with key auth, and two ready-made configs depending on what you're doing:
 
 Both modes share one install — the mode is just which launch script you run.
 Speculation wins below ~8 concurrent users, plain batching above. Numbers are
-`vllm bench serve` on an RTX 3090 at a 250 W power limit.
+`vllm bench serve` on an RTX 3090 at a 250 W power limit. If the card is yours
+alone, the fastest configuration is three environment variables away:
+[If you are the only user](#if-you-are-the-only-user-do-this).
 
 Prefill is a separate budget from either: ~1,810 tok/s at 1k inputs in batch
 mode (~1,210 single-user), ~1,000 tok/s at 100k, so a 100k prompt costs ~100 s
@@ -35,6 +37,54 @@ docker compose --profile single up -d      # one or a few users; or --profile ba
 Or by hand in a venv (same steps: model download, requantization, vLLM
 patches, `verify.sh`) — see [Setup](#setup). Then pick a mode:
 [batch/](batch/) for throughput, [single-user/](single-user/) for latency.
+
+### If you are the only user, do this
+
+The command above starts the conservative default — MTP speculation, 8 request
+slots, 64k context, 118 tok/s greedy at C1. Three settings are worth more than
+every other knob in this repo put together:
+
+```bash
+printf 'SPEC=dflash2\nDFLASH_TOKENS=15\nPREFIX_CACHE=1\n' >> .env
+docker compose --profile single up -d
+```
+
+or, in the venv install:
+
+```bash
+venv/bin/python fetch_dflash2.py     # once, 1.2 GB (Docker's prepare step does it for you)
+SPEC=dflash2 DFLASH_TOKENS=15 PREFIX_CACHE=1 bash single-user/start_qwen.sh
+```
+
+`SPEC=dflash2` swaps Qwen's MTP head for the DFlash2 block drafter: 7 tokens
+proposed in one pass instead of 4 chained ones. `DFLASH_TOKENS=15` then lets the
+target verify 16 tokens per step — the drafter still proposes the 7 it was
+trained for, and the remaining positions are filled from the request's own
+context, which costs nothing to draft and is exactly right whenever the answer
+quotes the prompt. `PREFIX_CACHE=1` keeps the document you already sent, both
+its attention KV and its recurrent state. One request at a time, greedy, RTX
+3090 at 250 W:
+
+| decode | MTP (default) | `SPEC=dflash2` | `+ DFLASH_TOKENS=15` |
+|---|---|---|---|
+| 8 real chat prompts | 118 tok/s | 132 | **133** |
+| reproducing a 25k-token document | n/a* | 260 | **382** |
+| request slots / context | 8 / 64k | 8 / 64k | 4 / 56k |
+
+<sub>\* drafting from the context only exists in `SPEC=dflash2`. The two right
+columns are one server session, where run-to-run greedy divergence is ±3-5%;
+reproduce them with `venv/bin/python bench/labd_bench.py <tag> --ctx 20000`.</sub>
+
+`PREFIX_CACHE=1` is orthogonal to the other two and worth as much again in a
+chat client: a second turn against that same 25k-token document takes 0.56 s to
+first token instead of 22.4 s, with the answers unchanged token for token.
+
+All of it is lossless: speculative decoding samples the same distribution as no
+speculation at all, the prefix cache resumes recurrent state rather than
+approximating it, and GSM8K reads 96.0-96.5% across the three columns. What
+`DFLASH_TOKENS=15` costs is half the request slots and 8k of context — that is
+the whole reason it is opt-in, and why the default stays where it is for anyone
+serving more than a few people. Every other knob: [single-user/](single-user/).
 
 ## Benchmarks
 

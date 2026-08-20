@@ -8,7 +8,12 @@
 # Knobs go in a .env file next to this file (never committed): VLLM_API_KEY=...,
 # and any of the start-script variables (CTX, KV, MAX_LEN, MAX_SEQS, GPU_UTIL,
 # SPEC_ATTN, DRAFT_TOKENS, EXTRA_ARGS, ...) — .env is passed straight into the
-# container. PORT and MODELS_DIR are read here: models live in ./models by default
+# container. Fastest single-user decode, if the card is yours alone (README,
+# "If you are the only user"; the drafter it needs is already downloaded by
+# prepare):
+#
+#   printf 'SPEC=dflash2\nDFLASH_TOKENS=15\nPREFIX_CACHE=1\n' >> .env
+# PORT and MODELS_DIR are read here: models live in ./models by default
 # (the same layout as the venv install, so both can share one download).
 # One GPU: run either "single" or "batch", not both.
 
