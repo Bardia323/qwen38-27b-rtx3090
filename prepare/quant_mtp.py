@@ -8,7 +8,7 @@ halves that traffic, int4 quarters it. The draft head only steers speculation
 (acceptance rate) — the sampled distribution stays exact either way — so this
 is a pure speed knob. Measured acceptance change: int8 none.
 
-Usage: python quant_mtp.py /path/to/Qwen3.8-27B-W4A16-AutoRound [--bits 8|4] [--keep-fc]
+Usage: python prepare/quant_mtp.py /path/to/Qwen3.8-27B-W4A16-AutoRound [--bits 8|4] [--keep-fc]
 --keep-fc leaves mtp.fc (the 10240->5120 input projection, 105 MB) in bf16.
 
 Rewrites model_extra_tensors.safetensors, the safetensors index and

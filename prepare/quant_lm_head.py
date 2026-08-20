@@ -6,7 +6,7 @@ The published W4A16 quants of Qwen3.8-27B leave lm_head in bf16 — that's a
 frees ~1.3 GB of VRAM for the KV/state pool. Measured +12% aggregate
 throughput on an RTX 3090, round-trip error 0.64% (Frobenius).
 
-Usage: python quant_lm_head.py /path/to/Qwen3.8-27B-W4A16-AutoRound
+Usage: python prepare/quant_lm_head.py /path/to/Qwen3.8-27B-W4A16-AutoRound
 
 Rewrites the shard containing lm_head.weight, the safetensors index and
 config.json. Backups are written next to the originals (.bak / .bak-quant).

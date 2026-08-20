@@ -54,7 +54,7 @@ Batch mode does 45-46 tok/s single-stream on the same prompts, and overtakes
 this mode from C8 up.
 
 **`SPEC=dflash2` — the DFlash2 block drafter (64k context)**, same protocol,
-`CTX=fast` + fast variant, W4A16 drafter from `fetch_dflash2.py`:
+`CTX=fast` + fast variant, W4A16 drafter from `prepare/fetch_dflash2.py`:
 
 | Cohort | decode, model-default sampling | decode, greedy | tokens per step | e2e (default / greedy) | mean TTFT |
 |---|---|---|---|---|---|
@@ -244,7 +244,7 @@ greedy):
 |---|---|---|---|
 | no speculation (batch mode) | 46 / 46 | 1.0 | — |
 | MTP-2 as shipped: bf16 module, full head, fp32 state | 66 / 79 | 2.1 / 2.4 | 65% / 80% |
-| MTP-4: int8 module (`quant_mtp.py`), 40k-token draft head (`build_draft_vocab.py`), fp16 state | 78 / 99 | 2.2 / 2.7 | 58% / 70% |
+| MTP-4: int8 module (`prepare/quant_mtp.py`), 40k-token draft head (`prepare/build_draft_vocab.py`), fp16 state | 78 / 99 | 2.2 / 2.7 | 58% / 70% |
 | + `draft_sample_method: probabilistic` | 90 / 98 | 2.6 / 2.7 | 69% / 70% |
 | same, k=3 (`CTX=long`) | 84 / 89 | 2.5 / 2.4 | 69% / 71% |
 | same, k=6 | 76 / 94 | 2.3 / 2.7 | |
@@ -305,14 +305,14 @@ DeltaNet layers can't verify a tree.
 ## Setup
 
 Do the [common setup](../README.md#setup) first (venv, model download,
-requantization, draft head, the fast variant via `fetch_fast_variant.py`, vLLM
+requantization, draft head, the fast variant via `prepare/fetch_fast_variant.py`, vLLM
 patches; `bash verify.sh --no-server` checks all of it). Then:
 
 ```bash
-bash single-user/start_qwen.sh                  # MTP (64k context)
-venv/bin/python fetch_dflash2.py                # once: the 1.2 GB W4A16 DFlash2 drafter
-SPEC=dflash2 bash single-user/start_qwen.sh     # DFlash2 (64k context, +10-15% at C1)
-bash bench/run_benchmarks.sh single             # reproduces the tables above
+bash single-user/start_qwen.sh                # MTP (64k context)
+venv/bin/python prepare/fetch_dflash2.py      # once: the 1.2 GB W4A16 DFlash2 drafter
+SPEC=dflash2 bash single-user/start_qwen.sh   # DFlash2 (64k context, +10-15% at C1)
+bash bench/run_benchmarks.sh single           # reproduces the tables above
 ```
 
 If you are the only person on the card, this is the fastest configuration here —
@@ -353,11 +353,11 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 
 | var | default | notes |
 |---|---|---|
-| `MODEL` | `models/Qwen3.8-27B-W4A16-AutoRound-fast` if present, else the base dir | the fast variant (`fetch_fast_variant.py`) is +15% |
+| `MODEL` | `models/Qwen3.8-27B-W4A16-AutoRound-fast` if present, else the base dir | the fast variant (`prepare/fetch_fast_variant.py`) is +15% |
 | `CTX` | `fast` | `fast`: bf16 KV / FlashAttention / 64k / 4 drafts / split-KV attention. `long`: fp8 KV / FlashInfer / 150k / 3 drafts, ~15% slower at C1, faster from C4 up. `huge`: KVarN 4/2-bit KV / 200k / 3 drafts (needs `bash kvarn/install.sh`; docs/long-context.md) |
 | `PREFIX_CACHE` | 0 | 1 = reuse a shared prompt prefix across requests (`--enable-prefix-caching --mamba-cache-mode align`): 20x faster follow-up turns, ~16% smaller KV pool |
 | `LOOKUP` | 1 (`SPEC=dflash2`) | draft from the request's own context when it repeats itself (`patches/dflash2-lookup-drafting.patch`), and fill the verify positions the drafter's block does not reach. `VLLM_DFLASH2_LOOKUP_NMIN` (6) is the shortest suffix that may match, `_NMAX` (12) the longest — the kernel prefers the longest match and breaks ties by recency, so a higher cap makes it choose an older long match over a newer short one, which is the worse predictor — `_NSTRONG` (6) the match length trusted on its own, `_AGREE` (0) how many tokens the drafter must independently agree on for a shorter match to be taken, `_NMIN_TAIL` (4) the same for positions the drafter never proposed, `_ADAPTIVE` (1 = ask the scheduler for the long block only while a copy is running, 0 = always long), `_LONGMIN` (6) the match length that counts as a fillable tail, `_STICKY` (3) steps to hold the long block after the flag drops, with one request in flight only — copies do not end when the flag says so, and re-entry costs two steps, but the counter is batch-wide and holding it across a mixed batch makes the block length depend on when the other requests arrived — `_CHEAP_CTX` (0 = off) a context length below which the long block is taken unconditionally |
-| `SPEC` | `mtp` | `dflash2`: the DFlash2 block drafter (`fetch_dflash2.py`; `CTX=fast` only, V2 model runner). `DRAFT` overrides the drafter dir, `DFLASH_TOKENS` (7) the *verify* block — the drafter always proposes the 7 it was trained for, and 15 here is reproduction mode (4 request slots, 56k context) — `DFLASH_MAX_LEN` (65536, or 57344 at `DFLASH_TOKENS=15`) the context, `KV_MEM` (5583457484 = 5.2 GiB) pins the KV pool — set `KV_MEM=` to size it from `GPU_UTIL` instead; `VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` disables the proposal truncation, `VLLM_DFLASH2_TORCH_TOPK=1` avoids the FlashInfer top-k JIT |
+| `SPEC` | `mtp` | `dflash2`: the DFlash2 block drafter (`prepare/fetch_dflash2.py`; `CTX=fast` only, V2 model runner). `DRAFT` overrides the drafter dir, `DFLASH_TOKENS` (7) the *verify* block — the drafter always proposes the 7 it was trained for, and 15 here is reproduction mode (4 request slots, 56k context) — `DFLASH_MAX_LEN` (65536, or 57344 at `DFLASH_TOKENS=15`) the context, `KV_MEM` (5583457484 = 5.2 GiB) pins the KV pool — set `KV_MEM=` to size it from `GPU_UTIL` instead; `VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` disables the proposal truncation, `VLLM_DFLASH2_TORCH_TOPK=1` avoids the FlashInfer top-k JIT |
 | `DRAFT_TOKENS` | 4 (3 for `CTX=long`/`huge`) | speculative depth; 5 and 6 are slower |
 | `SPEC_ATTN` | 1 (`CTX=fast` only) | split-KV Triton attention for the verify step (`patches/spec-decode-attn.patch`); 0 = FlashAttention-2 |
 | `DRAFT_SAMPLE` | `probabilistic` | `greedy` drafts: same speed at T=0, ~15% slower at T>0 |

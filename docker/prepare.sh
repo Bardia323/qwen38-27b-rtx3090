@@ -1,7 +1,7 @@
 #!/bin/bash
-# One-shot model preparation, idempotent: the README's Setup steps against
-# /app/models (a bind mount / volume), each skipped when its result is already
-# there. Runs on the CPU (no GPU needed). ~19.5 GB download + a few minutes of
+# One-shot model preparation, idempotent: the README's Setup steps (the scripts
+# in prepare/) against /app/models (a bind mount / volume), each skipped when its
+# result is already there. On the CPU (no GPU needed). ~19.5 GB download + a few minutes of
 # requantization; a fast-variant download of ~1 GB unless FAST_VARIANT=0, and the
 # ~1 GB W4A16 DFlash2 drafter (SPEC=dflash2) unless DFLASH2=0.
 #
@@ -43,14 +43,15 @@ fi
 [ "$TODO" = "download" ] && { echo "prepare: download incomplete (shards missing after hf download)"; exit 1; }
 for step in $TODO; do
   case $step in
-    lm_head) echo "== quant_lm_head.py (int8 lm_head)";      python quant_lm_head.py "$BASE" ;;
-    embed)   echo "== quant_embed.py (int8 embeddings)";     python quant_embed.py "$BASE" ;;
-    mtp)     echo "== quant_mtp.py (int8 MTP module)";       python quant_mtp.py "$BASE" ;;
-    draft)   echo "== build_draft_vocab.py (40k draft head)"; python build_draft_vocab.py "$BASE" --ids draft_vocab_ids.json ;;
+    lm_head) echo "== quant_lm_head.py (int8 lm_head)";      python prepare/quant_lm_head.py "$BASE" ;;
+    embed)   echo "== quant_embed.py (int8 embeddings)";     python prepare/quant_embed.py "$BASE" ;;
+    mtp)     echo "== quant_mtp.py (int8 MTP module)";       python prepare/quant_mtp.py "$BASE" ;;
+    draft)   echo "== build_draft_vocab.py (40k draft head)"
+             python prepare/build_draft_vocab.py "$BASE" --ids prepare/draft_vocab_ids.json ;;
     fast)    echo "== fetch_fast_variant.py (int4-GPTQ lm_head/MTP + own-output draft vocab, ~1 GB)"
-             python fetch_fast_variant.py "$BASE" "$BASE-fast" ;;
+             python prepare/fetch_fast_variant.py "$BASE" "$BASE-fast" ;;
     dflash2) echo "== fetch_dflash2.py (W4A16 DFlash2 drafter for SPEC=dflash2, ~1 GB; optional)"
-             python fetch_dflash2.py "$(dirname "$BASE")/Qwen3.8-27B-DFlash2-W4A16" \
+             python prepare/fetch_dflash2.py "$(dirname "$BASE")/Qwen3.8-27B-DFlash2-W4A16" \
                || echo "prepare: DFlash2 drafter not fetched (optional: SPEC=dflash2 unavailable; DFLASH2=0 silences this)" ;;
   esac
 done

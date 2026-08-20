@@ -7,7 +7,7 @@
 # `-fast` model variant (see "Fast variant" below): ~114 tok/s at the model's
 # default sampling, ~124 tok/s greedy (vs 46 tok/s without speculation).
 # What makes 4 drafts pay off, in order of importance:
-#  - the drafter scores a 40k-token draft head (build_draft_vocab.py) — and the
+#  - the drafter scores a 40k-token draft head (prepare/build_draft_vocab.py) — and the
 #    id list matters: a vocabulary counted over the model's OWN outputs covers
 #    97.5% of what it generates (96% on code); the earlier web-text list only 92%
 #    (83% on code), and every miss is a forced rejection (108 vs 98 tok/s greedy)
@@ -57,7 +57,7 @@ API_SERVERS=${API_SERVERS:-1}
 CTX=${CTX:-fast}
 # SPEC=mtp (default): Qwen's own MTP head, k drafts chained (the numbers above).
 # SPEC=dflash2: the DFlash2 block drafter (incoai/Qwen3.8-27B-DFlash2, requantized
-#   to W4A16 by this repo: fetch_dflash2.py), 7 drafts in ONE non-autoregressive
+#   to W4A16 by this repo: prepare/fetch_dflash2.py), 7 drafts in ONE non-autoregressive
 #   pass + a path selector; runs on vLLM's V2 model runner
 #   (patches/dflash2-backport.patch). CTX=fast only (bf16 KV / FLASH_ATTN; the
 #   drafter's block attention is non-causal); see README "DFlash2".
@@ -101,7 +101,7 @@ if [ "$SPEC" = "dflash2" ]; then
       [ -f "$REPO/models/$d/model.safetensors" ] && DRAFT=$REPO/models/$d && break
     done
   fi
-  [ -n "$DRAFT" ] || { echo "SPEC=dflash2 needs the drafter: venv/bin/python fetch_dflash2.py" >&2; exit 1; }
+  [ -n "$DRAFT" ] || { echo "SPEC=dflash2 needs the drafter: venv/bin/python prepare/fetch_dflash2.py" >&2; exit 1; }
   # Lookup-augmented drafting: when the model is reproducing something from its context,
   # draft from the context instead of from the drafter
   # (patches/dflash2-lookup-drafting.patch).

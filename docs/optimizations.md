@@ -8,7 +8,7 @@ Nine things stock vLLM doesn't give you on this model — summarised, then expla
 
 One line each; the rest of this page is the long version.
 
-1. **Both embedding matrices requantized** (`quant_lm_head.py`, `quant_embed.py`)
+1. **Both embedding matrices requantized** (`prepare/quant_lm_head.py`, `prepare/quant_embed.py`)
    — the public W4A16 quants leave two 2.5 GB bf16 matrices alone. 2.6 GB back.
 2. **A two-line vLLM patch** so the model code actually uses vLLM's quantized
    embedding kernel (`patches/qwen3_5-embed-quant.patch`).
@@ -38,8 +38,8 @@ One line each; the rest of this page is the long version.
 
 1. **Both embedding matrices requantized.** Qwen3.8-27B has untied embeddings,
    so the public W4A16 quants carry two separate 2.5 GB bf16 matrices (lm_head
-   and embed_tokens) that nobody bothered to quantize. `quant_lm_head.py` and
-   `quant_embed.py` requantize both to int8 group-128 in place (~0.6%
+   and embed_tokens) that nobody bothered to quantize. `prepare/quant_lm_head.py` and
+   `prepare/quant_embed.py` requantize both to int8 group-128 in place (~0.6%
    round-trip error, no quality regression we could find). That's 2.6 GB of
    VRAM back.
 2. **A small vLLM patch for those embeddings.** vLLM ships a dequant-on-gather
@@ -71,13 +71,13 @@ One line each; the rest of this page is the long version.
    model actually says.** The shipped MTP draft module is bf16 (850 MB) and
    every draft token also runs the full 248k-row lm_head (1.3 GB), so each
    extra draft cost ~3 ms and MTP-3 was already slower than MTP-2.
-   `quant_mtp.py` requantizes the draft module (int8; the fast variant uses
-   GPTQ int4, `drafter/`), `build_draft_vocab.py` builds a 40k-token draft head
+   `prepare/quant_mtp.py` requantizes the draft module (int8; the fast variant uses
+   GPTQ int4, `drafter/`), `prepare/build_draft_vocab.py` builds a 40k-token draft head
    and `patches/qwen3_5-mtp-draft-vocab.patch` makes the drafter use it. A
    draft now costs ~0.5-1 ms and four of them pay off. The id list matters
    more than anything else in this repo's single-user numbers: a token outside
    the draft vocabulary can never be proposed, so it is a guaranteed rejection
-   that also cuts the chain. The list we now ship (`draft_vocab_ids.json`) is
+   that also cuts the chain. The list we now ship (`prepare/draft_vocab_ids.json`) is
    counted over 5.4M tokens of the model's own outputs and covers 97.5% of what
    it generates (96% on code); the earlier web-text list covered 92% (83% on
    code) and cost 10% of single-stream throughput on its own.
@@ -141,7 +141,7 @@ size. What it took to make it pay on a 24 GB card, in order:
    `drafter/quant_dflash2.py` GPTQ-quantizes the 36 matrices to W4A16
    compressed-tensors (Marlin): **1.19 GB**, shipped as
    [syvai/Qwen3.8-27B-DFlash2-W4A16](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16)
-   (`fetch_dflash2.py`). int4 costs ~5% acceptance at default sampling (3.2 vs
+   (`prepare/fetch_dflash2.py`). int4 costs ~5% acceptance at default sampling (3.2 vs
    3.4 tokens per step) and nothing at greedy; keeping `fc` in bf16 did not
    recover it.
 3. **Result** (`bench/run_benchmarks.sh single`, fast variant target): 26.5 ms

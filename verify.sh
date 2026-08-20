@@ -72,14 +72,14 @@ def fail(m):
     global F
     print("  FAIL ", m); F += 1
 # lm_head / embed int8
-if "lm_head.weight_packed" in idx and any(g["targets"] == ["re:.*lm_head$"] and g["weights"]["num_bits"] == 8 for g in groups.values()): ok("lm_head requantized to int8 (quant_lm_head.py)")
-else: fail("lm_head not requantized: run quant_lm_head.py")
-if any(k.endswith("embed_tokens.weight_packed") for k in idx) and any(g["targets"] == ["re:.*embed_tokens$"] for g in groups.values()): ok("embed_tokens requantized to int8 (quant_embed.py)")
-else: fail("embed_tokens not requantized: run quant_embed.py")
-if "mtp.layers.0.mlp.down_proj.weight_packed" in idx and "mtp.layers.0.mlp.down_proj" not in ign: ok("MTP draft module quantized (quant_mtp.py)")
-else: print("  WARN  MTP module still bf16 (quant_mtp.py) — single-user mode is slower without it")
-if "mtp.draft_lm_head.weight_packed" in idx and os.path.exists(d + "mtp_draft_vocab_ids.pt"): ok("40k-token draft head present (build_draft_vocab.py)")
-else: print("  WARN  draft head missing (build_draft_vocab.py --ids draft_vocab_ids.json) — single-user mode drafts with the full lm_head")
+if "lm_head.weight_packed" in idx and any(g["targets"] == ["re:.*lm_head$"] and g["weights"]["num_bits"] == 8 for g in groups.values()): ok("lm_head requantized to int8 (prepare/quant_lm_head.py)")
+else: fail("lm_head not requantized: run prepare/quant_lm_head.py")
+if any(k.endswith("embed_tokens.weight_packed") for k in idx) and any(g["targets"] == ["re:.*embed_tokens$"] for g in groups.values()): ok("embed_tokens requantized to int8 (prepare/quant_embed.py)")
+else: fail("embed_tokens not requantized: run prepare/quant_embed.py")
+if "mtp.layers.0.mlp.down_proj.weight_packed" in idx and "mtp.layers.0.mlp.down_proj" not in ign: ok("MTP draft module quantized (prepare/quant_mtp.py)")
+else: print("  WARN  MTP module still bf16 (prepare/quant_mtp.py) — single-user mode is slower without it")
+if "mtp.draft_lm_head.weight_packed" in idx and os.path.exists(d + "mtp_draft_vocab_ids.pt"): ok("40k-token draft head present (prepare/build_draft_vocab.py)")
+else: print("  WARN  draft head missing (prepare/build_draft_vocab.py --ids prepare/draft_vocab_ids.json) — single-user mode drafts with the full lm_head")
 missing = [f for f in set(idx.values()) if not os.path.exists(d + f)]
 if missing: fail(f"safetensors shards missing: {missing}")
 else: ok(f"{len(set(idx.values()))} safetensors shards present")
@@ -89,13 +89,13 @@ EOF
 fi
 
 echo "== single-user fast variant (optional)"
-if [ -d "$HERE/models/Qwen3.8-27B-W4A16-AutoRound-fast" ]; then ok "fast variant present (int4-GPTQ lm_head/MTP, own-output draft vocab)"; else warn "no models/Qwen3.8-27B-W4A16-AutoRound-fast (venv/bin/python fetch_fast_variant.py; single-user mode is ~15% slower without it)"; fi
+if [ -d "$HERE/models/Qwen3.8-27B-W4A16-AutoRound-fast" ]; then ok "fast variant present (int4-GPTQ lm_head/MTP, own-output draft vocab)"; else warn "no models/Qwen3.8-27B-W4A16-AutoRound-fast (venv/bin/python prepare/fetch_fast_variant.py; single-user mode is ~15% slower without it)"; fi
 echo "== single-user DFlash2 drafter (optional, SPEC=dflash2)"
 if [ -f "$HERE/models/Qwen3.8-27B-DFlash2-W4A16/config.json" ]; then
   $PY -c "import json,sys; c=json.load(open('$HERE/models/Qwen3.8-27B-DFlash2-W4A16/config.json')); assert c['architectures']==['DFlash2DraftModel'] and c['quantization_config']['quant_method']=='compressed-tensors'" 2>/dev/null && ok "DFlash2 drafter present, W4A16 (models/Qwen3.8-27B-DFlash2-W4A16)" || fail "models/Qwen3.8-27B-DFlash2-W4A16 is not a quantized DFlash2DraftModel checkpoint"
   [ -f "$SP/model_executor/models/qwen3_dflash2.py" ] || fail "DFlash2 drafter present but patches/dflash2-backport.patch not applied"
-elif [ -f "$HERE/models/Qwen3.8-27B-DFlash2/config.json" ]; then warn "only the bf16 DFlash2 drafter is present (3.85 GB; venv/bin/python fetch_dflash2.py for the 1 GB W4A16 one)"
-else warn "no DFlash2 drafter (venv/bin/python fetch_dflash2.py; SPEC=dflash2 single-user mode needs it)"; fi
+elif [ -f "$HERE/models/Qwen3.8-27B-DFlash2/config.json" ]; then warn "only the bf16 DFlash2 drafter is present (3.85 GB; venv/bin/python prepare/fetch_dflash2.py for the 1 GB W4A16 one)"
+else warn "no DFlash2 drafter (venv/bin/python prepare/fetch_dflash2.py; SPEC=dflash2 single-user mode needs it)"; fi
 
 echo "== keys / units"
 [ -s api_key.txt ] || [ -n "${VLLM_API_KEY:-}" ] && ok "API key configured (api_key.txt or VLLM_API_KEY)" || fail "no api_key.txt (openssl rand -hex 24 > api_key.txt)"

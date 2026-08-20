@@ -6,13 +6,13 @@ Shards 1-6, tokenizer and template files are hardlinked from the base dir (no ex
 disk); shard 7, model_extra_tensors, config, index and the draft vocab ids are
 downloaded. To rebuild the tensors yourself instead, see drafter/README.md.
 
-  venv/bin/python fetch_fast_variant.py [base_dir] [dst_dir]
+  venv/bin/python prepare/fetch_fast_variant.py [base_dir] [dst_dir]
 """
 import os, sys, shutil
 from huggingface_hub import snapshot_download
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-S = (sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "models", "Qwen3.8-27B-W4A16-AutoRound")).rstrip("/")
+HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
+S = (sys.argv[1] if len(sys.argv) > 1 else os.path.join(REPO, "models", "Qwen3.8-27B-W4A16-AutoRound")).rstrip("/")
 D = (sys.argv[2] if len(sys.argv) > 2 else S + "-fast").rstrip("/")
 S = os.path.realpath(S)
 assert os.path.exists(os.path.join(S, "config.json")), f"base model not found at {S} (README: Setup)"

@@ -2,7 +2,7 @@
 
 Tooling used to build the single-user "fast" variant of the model
 (`models/Qwen3.8-27B-W4A16-AutoRound-fast`, prebuilt on the Hub as
-`syvai/qwen3.8-27b-3090-fast-variant`; `fetch_fast_variant.py` assembles it). It also
+`syvai/qwen3.8-27b-3090-fast-variant`; `prepare/fetch_fast_variant.py` assembles it). It also
 contains a complete MTP-head fine-tuning pipeline that, honestly, did **not** move the
 needle — kept because the negative result is informative and the same data feeds the
 things that did work.
@@ -12,7 +12,7 @@ Everything here runs on the 3090 in the serving venv; ~6 h of GPU time end to en
 ## What actually mattered (in order)
 
 1. **The draft-head vocabulary.** The MTP drafter scores a 40,960-row slice of `lm_head`
-   (`build_draft_vocab.py`); a token outside that slice can never be drafted, so every
+   (`prepare/build_draft_vocab.py`); a token outside that slice can never be drafted, so every
    such token is a guaranteed rejection *and* truncates the chain. The originally shipped id
    list (counted over Danish web text, Wikipedia, Python, and 8.8M tokens of older outputs)
    covered 92.1% of what the model actually generates — 83% on code. A list counted over
@@ -45,11 +45,11 @@ $V drafter/collect_prompts.py                 # 6.8k prompts: UltraChat, Magicod
 VLLM_MARLIN_INPUT_DTYPE=int8 VLLM_MARLIN_INT8_INCLUDE_RE=mlp $V drafter/gen_data.py   # 2.2 h, 5.4M output tokens
 $V drafter/capture.py                         # 1.7 h: hidden states of every token (74 GB memmap), in-process
                                               #   vLLM hook on GPUModelRunner._model_forward
-# draft vocab from the model's own outputs -> draft_vocab_ids.json (the shipped list)
-$V drafter/train_mtp.py --out drafter/runs/e --eval-only 1 --draft-ids draft_vocab_ids.json \
+# draft vocab from the model's own outputs -> prepare/draft_vocab_ids.json (the shipped list)
+$V drafter/train_mtp.py --out drafter/runs/e --eval-only 1 --draft-ids prepare/draft_vocab_ids.json \
      --max-seqs 400 --val-frac 0.4 --depths 2 --dump-hessians drafter/runs/e/mtp_hessians.pt
 $V drafter/gptq_lm_head.py models/Qwen3.8-27B-W4A16-AutoRound models/tmp-lm4 --bits 4 --calib-rows 300000
-$V build_draft_vocab.py models/tmp-lm4 --ids draft_vocab_ids.json      # int4 draft head from the int4 lm_head
+$V prepare/build_draft_vocab.py models/tmp-lm4 --ids prepare/draft_vocab_ids.json   # int4 draft head from the int4 lm_head
 $V drafter/requant_mtp_gptq.py models/tmp-lm4 models/Qwen3.8-27B-W4A16-AutoRound-fast drafter/runs/e/mtp_hessians.pt --bits 4
 ```
 
@@ -67,11 +67,11 @@ target's layer 5/19/33/47/61 hidden states, dynamic convs, a candidate selector;
 params, 3.85 GB bf16). Read once per decode step that is ~5 ms on a 3090 and a 21k-token
 KV pool, so it ships requantized to W4A16 compressed-tensors (Marlin), 1.19 GB:
 [syvai/Qwen3.8-27B-DFlash2-W4A16](https://huggingface.co/syvai/Qwen3.8-27B-DFlash2-W4A16)
-(`fetch_dflash2.py`). To rebuild it:
+(`prepare/fetch_dflash2.py`). To rebuild it:
 
 ```bash
 V=venv/bin/python
-$V fetch_dflash2.py --bf16                               # models/Qwen3.8-27B-DFlash2 (3.85 GB)
+$V prepare/fetch_dflash2.py --bf16                               # models/Qwen3.8-27B-DFlash2 (3.85 GB)
 # 1. Hessians from the drafter's OWN inputs: vLLM in-process, eager (hooks), the bf16 drafter
 #    speculating on 400 prompts of data/gen.jsonl at model-default sampling, ~20 min;
 #    hooks on qkv_proj / o_proj / gate_up_proj (GPU fp32 Hessians), down_proj / fc (rows

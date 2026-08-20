@@ -23,7 +23,7 @@ on and what our stack needs:
   - our stack: the draft shares the target's int8-Marlin lm_head, so compute_candidates
     accepts any quant_method with apply() (2-D input); the context-KV precompute
     dequantizes k/v rows from a W4A16 (compressed-tensors) qkv_proj so the drafter itself
-    can be requantized (fetch_dflash2.py / drafter/quant_dflash2.py); flashinfer.top_k
+    can be requantized (prepare/fetch_dflash2.py / drafter/quant_dflash2.py); flashinfer.top_k
     falls back to torch.topk if its JIT build fails (VLLM_DFLASH2_TORCH_TOPK=1 forces
     torch.topk); the V2 sampler passes k_max so patches/sampler-small-topk-fast-softmax's
     sort-free small-k top-k/top-p path is used under the V2 runner too; the selector

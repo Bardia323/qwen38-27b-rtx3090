@@ -14,9 +14,9 @@ as `mtp.draft_lm_head.*` in model_extra_tensors.safetensors, plus the id map in
 `mtp_draft_vocab_ids.pt`. Needs the matching vLLM patch
 (patches/qwen3_5-mtp-draft-vocab.patch) to be used.
 
-Usage:
-  python build_draft_vocab.py /path/to/model --ids draft_vocab_ids.json     # use the shipped id list
-  python build_draft_vocab.py /path/to/model --n 40960 --corpus f1 f2 ...   # or count your own corpus
+Usage (from the repo root):
+  python prepare/build_draft_vocab.py /path/to/model --ids prepare/draft_vocab_ids.json  # shipped id list
+  python prepare/build_draft_vocab.py /path/to/model --n 40960 --corpus f1 f2 ...        # or count your own
 Corpus files: .txt/.jsonl (uses "prompt"/"response"/"messages"/"text" fields)/.parquet(text)/.py
 The shipped draft_vocab_ids.json was counted over Danish web text (fineweb-2),
 English Wikipedia, Python source and the model's own chat outputs (8.8M tokens);

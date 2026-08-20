@@ -4,10 +4,10 @@
                        [--gptq hessians.pt]     # GPTQ (calibrated) instead of RTN for the mtp linears
 
 dst_dir gets hardlinked weight shards, the pre-MTP-quant config/index, a fresh
-model_extra_tensors.safetensors with the trained mtp.* tensors (bf16), then quant_mtp.py
+model_extra_tensors.safetensors with the trained mtp.* tensors (bf16), then prepare/quant_mtp.py
 (int8/int4 RTN) is run on it, and the draft head is written: the trained
 mtp.draft_lm_head.weight if present in the checkpoint, else rows sliced from lm_head
-(build_draft_vocab.py --ids).
+(prepare/build_draft_vocab.py --ids).
 """
 import json, os, sys, shutil, subprocess
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
@@ -56,9 +56,9 @@ print(f"wrote {n_new} trained tensors (+{len(out) - n_new} kept) to {D}model_ext
 
 GPTQ = sys.argv[sys.argv.index("--gptq") + 1] if "--gptq" in sys.argv else None
 if GPTQ is None:
-    subprocess.check_call([sys.executable, f"{QS}/quant_mtp.py", D, "--bits", str(BITS)])
+    subprocess.check_call([sys.executable, f"{QS}/prepare/quant_mtp.py", D, "--bits", str(BITS)])
 else:
-    # same output format as quant_mtp.py, weights quantized with GPTQ using the dumped Hessians
+    # same output format as prepare/quant_mtp.py, weights quantized with GPTQ using the dumped Hessians
     import copy
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     from gptq_utils import gptq_quantize, dequant
@@ -102,8 +102,8 @@ else:
     json.dump(c, open(D + "config.json", "w"), indent=2)
 
 if head is None:
-    subprocess.check_call([sys.executable, f"{QS}/build_draft_vocab.py", D, "--ids",
-                           os.environ.get("DRAFT_IDS", f"{QS}/draft_vocab_ids.json")])
+    subprocess.check_call([sys.executable, f"{QS}/prepare/build_draft_vocab.py", D, "--ids",
+                           os.environ.get("DRAFT_IDS", f"{QS}/prepare/draft_vocab_ids.json")])
 else:
     GROUP = 128; QMAX = 2 ** (HBITS - 1) - 1
     w = head.to(torch.float32)

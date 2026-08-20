@@ -1,7 +1,7 @@
 Vocab-truncated draft head for Qwen3.5/3.8 MTP speculative decoding.
 
 If the model directory contains mtp_draft_vocab_ids.pt and the checkpoint has
-mtp.draft_lm_head.* tensors (both produced by build_draft_vocab.py), the MTP
+mtp.draft_lm_head.* tensors (both produced by prepare/build_draft_vocab.py), the MTP
 drafter scores only those rows instead of the full 248k-row lm_head; logits of
 all other ids are -inf. Speculative decoding stays exact (rejection sampling
 uses the target model), only the acceptance rate can change. Set

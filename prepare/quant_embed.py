@@ -7,7 +7,7 @@ embeddings (CompressedTensorsEmbeddingWNA16Int) but the qwen3_5 model code
 never passes quant_config to VocabParallelEmbedding, so you also need the
 two-line patch in patches/qwen3_5-embed-quant.patch.
 
-Usage: python quant_embed.py /path/to/Qwen3.8-27B-W4A16-AutoRound
+Usage: python prepare/quant_embed.py /path/to/Qwen3.8-27B-W4A16-AutoRound
 
 Measured on an RTX 3090: another ~1.3 GB freed, round-trip error 0.56%.
 """

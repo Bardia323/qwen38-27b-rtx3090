@@ -92,4 +92,4 @@ json.dump(idx, open(D + "model.safetensors.index.json", "w"), indent=2)
 c = json.load(open(S + "config.json"))
 c["quantization_config"]["config_groups"]["group_1"]["weights"]["num_bits"] = BITS
 json.dump(c, open(D + "config.json", "w"), indent=2)
-print("wrote", D, "(draft head still needs build_draft_vocab.py --ids if lm_head bits changed)")
+print("wrote", D, "(draft head still needs prepare/build_draft_vocab.py --ids if lm_head bits changed)")

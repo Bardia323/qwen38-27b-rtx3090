@@ -52,7 +52,7 @@ docker compose --profile single up -d
 or, in the venv install:
 
 ```bash
-venv/bin/python fetch_dflash2.py     # once, 1.2 GB (Docker's prepare step does it for you)
+venv/bin/python prepare/fetch_dflash2.py   # once, 1.2 GB (Docker's prepare step does it for you)
 SPEC=dflash2 DFLASH_TOKENS=15 PREFIX_CACHE=1 bash single-user/start_qwen.sh
 ```
 
@@ -203,16 +203,17 @@ HF_HUB_ENABLE_HF_TRANSFER=1 venv/bin/hf download \
   --local-dir models/Qwen3.8-27B-W4A16-AutoRound
 
 # requantize lm_head + embeddings + the MTP draft module (CPU only, a few minutes)
-venv/bin/python quant_lm_head.py models/Qwen3.8-27B-W4A16-AutoRound
-venv/bin/python quant_embed.py   models/Qwen3.8-27B-W4A16-AutoRound
-venv/bin/python quant_mtp.py     models/Qwen3.8-27B-W4A16-AutoRound
+venv/bin/python prepare/quant_lm_head.py models/Qwen3.8-27B-W4A16-AutoRound
+venv/bin/python prepare/quant_embed.py   models/Qwen3.8-27B-W4A16-AutoRound
+venv/bin/python prepare/quant_mtp.py     models/Qwen3.8-27B-W4A16-AutoRound
 # 40k-token draft head for single-user mode (uses the shipped id list)
-venv/bin/python build_draft_vocab.py models/Qwen3.8-27B-W4A16-AutoRound --ids draft_vocab_ids.json
+venv/bin/python prepare/build_draft_vocab.py models/Qwen3.8-27B-W4A16-AutoRound \
+  --ids prepare/draft_vocab_ids.json
 # single-user "fast" variant (~1 GB from the Hub, hardlinks the rest): int4-GPTQ
 # lm_head + drafter; single-user/start_qwen.sh picks it up automatically
-venv/bin/python fetch_fast_variant.py
+venv/bin/python prepare/fetch_fast_variant.py
 # optional: the W4A16 DFlash2 block drafter (1.2 GB) for SPEC=dflash2 single-user mode
-venv/bin/python fetch_dflash2.py
+venv/bin/python prepare/fetch_dflash2.py
 
 # patch vllm (all written against 0.27.1; reapply after upgrades)
 for p in patches/*.patch; do
@@ -266,6 +267,7 @@ perplexity / GSM8K rows.
 | [docs/docker.md](docs/docker.md) | The container image, and an independent WSL2 reproduction. |
 | [docs/long-context.md](docs/long-context.md) | 262k context with the KVarN 4/2-bit KV cache, what vLLM's own per-token-head KV modes are worth here, and how to run the DFlash2 drafter past 64k (`CTX=long`, 114-139k — worth it only for context reproduction). |
 | [batch/](batch/) · [single-user/](single-user/) | The two serving modes: full benchmark tables, every env knob, systemd units. |
+| [prepare/](prepare/) | The one-time model-preparation scripts run by [Setup](#setup) (and by `docker compose run --rm prepare`). |
 | [drafter/](drafter/) | How the draft vocabulary, the int4 drafters and the DFlash2 requantization were built — including what did not work. |
 | [kvarn/](kvarn/) | The KVarN 4/2-bit KV cache port. |
 

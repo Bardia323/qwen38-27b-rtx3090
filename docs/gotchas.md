@@ -52,7 +52,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
 12. **The draft vocabulary is the single-user ceiling.** A draft head can only
     propose tokens in its id list; a miss is a certain rejection that also ends
     the chain. Count the list over the model's *own* outputs (`drafter/gen_data.py`,
-    then the frequency step in `build_draft_vocab.py`), not over web text —
+    then the frequency step in `prepare/build_draft_vocab.py`), not over web text —
     92% vs 97.5% coverage was the difference between 98 and 109 tok/s greedy.
     Coverage saturates around 40k rows; the model only ever emits ~54k distinct
     tokens.
