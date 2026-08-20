@@ -146,21 +146,33 @@ verify 8 tokens. Lossless either way: greedy never reads the draft distribution,
 position the lookup filled gets a point mass on the proposed token, which is a legal
 proposal for the rejection sampler.
 
-| 25k-token document, greedy | no lookup | default (`DFLASH_TOKENS=7`) | `DFLASH_TOKENS=15` |
-|---|---|---|---|
-| reproduce the first 60 lines verbatim | 4.72 / 159 | 7.83 / 259 | **15.64 / 389** |
-| "shorten this, keep the commands" | 2.70 / 90 | 3.19 / 106 | **3.74 / 113** |
-| "quote and explain" | 3.01 / 101 | 3.21 / 107 | 3.10 / 94 |
-| "reproduce every command, verbatim" | 4.62 / 153 | 5.23 / 172 | 4.85 / 138 |
-| free-form summary / Q&A | 2.15 / 72, 1.98 / 66 | 2.08 / 69, 2.02 / 67 | 2.14 / 67, 2.01 / 63 |
-| C1, the 8 short prompts above | 3.22 / 126 | 3.33 / 130 | **3.59 / 141** |
+The long block is only *scheduled* while a copy is actually running. The lookup's flag says
+a request has something to put in the tail; the trigger adds that the step that just
+finished emitted at least a full short block's worth of tokens, twice in a row. One
+saturated step happens in the middle of ordinary prose — a quoted phrase, a repeated list
+marker — and the block it would buy is then wasted; two in a row is a copy.
 
-(tokens per step / decode tok/s, one server session so the columns are comparable.)
-Verbatim reproduction is the case the long block exists for: **+50%**, and +9% on the short
-C1 prompts where the extra verify positions are nearly free. It is not free at 25k context
-on work that mixes prose with quoting — "quote and explain" gives back 12%, "list every
-command" 20% — which is why 7 stays the default and 15 is a mode you turn on for a coding
-assistant applying edits, or a RAG front-end quoting its sources.
+| 25k-token document, greedy | `DFLASH_TOKENS=15`, long block off | with the trigger |
+|---|---|---|
+| reproduce the first 60 lines verbatim | 7.83 / 244 | **14.97 / 380 (+55%)** |
+| "shorten this, keep the commands" | 3.19 / 101 | **3.50 / 111 (+10%)** |
+| free-form Q&A | 2.01 / 63 | **2.01 / 65 (+3%)** |
+| free-form summary | 2.13 / 67 | **2.13 / 69 (+3%)** |
+| "quote and explain" | 2.99 / 94 | **2.99 / 96 (+2%)** |
+| "reproduce every command, verbatim" | 5.23 / 163 | 5.33 / 164 (+1%) |
+
+(tokens per step / decode tok/s, one server session.) Against the same server with the long
+block disabled the trigger is a gain on every task, which is the property it was tuned for:
+it costs step time only where the tail is being accepted.
+
+Against the default `DFLASH_TOKENS=7` server the picture is mixed — +46% on verbatim
+reproduction and +4% on rewrite-but-keep work, level at C1 (3.40 vs 3.33 tokens per step,
+129.5 vs 130.7 tok/s) and on summarization, but 3-10% behind on quote-and-explain and
+list-every-command. Turning the long block off on the same 15-slot server reproduces most of
+that gap, so it is what the wider verify configuration costs before a single long block is
+scheduled, not the trigger: a 15-slot server does more fixed work per step than a 7-slot one
+(the draft-logit cache and the point-mass rewrite both span the whole block), and the extra
+acceptance changes the text, which changes acceptance again.
 
 Reproduction mode also costs KV pool per request slot rather than per token
 (`--mamba-cache-mode align` reserves state pages per slot per speculative block), so it runs
@@ -290,7 +302,7 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 | `MODEL` | `models/Qwen3.8-27B-W4A16-AutoRound-fast` if present, else the base dir | the fast variant (`fetch_fast_variant.py`) is +15% |
 | `CTX` | `fast` | `fast`: bf16 KV / FlashAttention / 64k / 4 drafts / split-KV attention. `long`: fp8 KV / FlashInfer / 150k / 3 drafts, ~15% slower at C1, faster from C4 up. `huge`: KVarN 4/2-bit KV / 200k / 3 drafts (needs `bash kvarn/install.sh`; docs/long-context.md) |
 | `PREFIX_CACHE` | 0 | 1 = reuse a shared prompt prefix across requests (`--enable-prefix-caching --mamba-cache-mode align`): 20x faster follow-up turns, ~16% smaller KV pool |
-| `LOOKUP` | 1 (`SPEC=dflash2`) | draft from the request's own context when it repeats itself (`patches/dflash2-lookup-drafting.patch`), and fill the verify positions the drafter's block does not reach. `VLLM_DFLASH2_LOOKUP_NMIN` (4) is the shortest suffix that may match, `_NMAX` (32) the longest, `_NSTRONG` (8) the match length trusted on its own, `_AGREE` (2) how many tokens the drafter must independently agree on for a shorter match to be taken, `_ADAPTIVE` (1 = ask the scheduler for the long block only while the lookup is firing, 0 = always long) |
+| `LOOKUP` | 1 (`SPEC=dflash2`) | draft from the request's own context when it repeats itself (`patches/dflash2-lookup-drafting.patch`), and fill the verify positions the drafter's block does not reach. `VLLM_DFLASH2_LOOKUP_NMIN` (4) is the shortest suffix that may match, `_NMAX` (32) the longest, `_NSTRONG` (8) the match length trusted on its own, `_AGREE` (2) how many tokens the drafter must independently agree on for a shorter match to be taken, `_ADAPTIVE` (1 = ask the scheduler for the long block only while a copy is running, 0 = always long), `_LONGMIN` (6) the match length that counts as a fillable tail, `_CHEAP_CTX` (0 = off) a context length below which the long block is taken unconditionally |
 | `SPEC` | `mtp` | `dflash2`: the DFlash2 block drafter (`fetch_dflash2.py`; `CTX=fast` only, V2 model runner). `DRAFT` overrides the drafter dir, `DFLASH_TOKENS` (7) the *verify* block — the drafter always proposes the 7 it was trained for, and 15 here is reproduction mode (4 request slots, 56k context) — `DFLASH_MAX_LEN` (65536, or 57344 at `DFLASH_TOKENS=15`) the context, `KV_MEM` (5583457484 = 5.2 GiB) pins the KV pool — set `KV_MEM=` to size it from `GPU_UTIL` instead; `VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` disables the proposal truncation, `VLLM_DFLASH2_TORCH_TOPK=1` avoids the FlashInfer top-k JIT |
 | `DRAFT_TOKENS` | 4 (3 for `CTX=long`/`huge`) | speculative depth; 5 and 6 are slower |
 | `SPEC_ATTN` | 1 (`CTX=fast` only) | split-KV Triton attention for the verify step (`patches/spec-decode-attn.patch`); 0 = FlashAttention-2 |

@@ -130,3 +130,20 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     per slot, so `DFLASH_TOKENS=31` with 8 slots wants 5.3 GiB before a single token of
     context and refuses to start. Single-user mode drops to 4 slots when the block is long,
     which is what makes the long block affordable at all.
+24. **The DFlash draft pass is a captured CUDA graph, so its Python runs once.**
+    `DFlashSpeculator._generate_draft` — everything the speculator does per step, including
+    the lookup — is replayed from a graph. The Triton kernels inside it do run every step and
+    do read live buffers, so the lookup itself works; but host-side Python in there executes
+    at *capture* time only. A counter, a pinned copy of a flag, a decision computed there is
+    frozen at whatever the warm-up produced, silently. Anything the host must see per step
+    belongs in a method the model runner calls per step (`next_num_draft_tokens`), reading
+    device tensors the replayed kernels wrote. Three separate "the trigger doesn't fire"
+    debugging rounds were this.
+25. **`torch.cuda.is_current_stream_capturing()` is not a usable guard on this path.** It
+    reads True inside the captured draft pass — which is correct, and exactly why a guard
+    written as `if not is_current_stream_capturing():` silently disables the code it guards
+    for the entire run, not just during warm-up.
+26. **rsync preserves mtimes, and Python trusts mtimes.** Copying a source file into
+    `site-packages` with `rsync -a` can leave the `.pyc` newer than the `.py`, in which case
+    the interpreter keeps running the old bytecode and every measurement lands on the
+    previous revision. Delete `__pycache__` after installing patched files.

@@ -192,12 +192,20 @@ first 60 lines. The drafter now keeps its own block while the target verifies a 
 candidate head — which is the point: the context is a free source of drafts, the drafter is
 not.
 
-**The long block is only scheduled while the lookup is firing.** Each extra verify position
+**The long block is only scheduled while a copy is running.** Each extra verify position
 costs about 1 ms of attention at 25k context, so the speculator reports per step how many of
 its proposals the scheduler should actually put up for verification: the drafter's 7
-normally, the whole block when the lookup has a match, decided from a pinned copy of the
-per-request match flags. vLLM only feeds that number back to the scheduler on the synchronous
-scheduling path, so this mode runs `--no-async-scheduling`; at batch 1 that costs under 1%.
+normally, the whole block when (a) the lookup has a match with enough tokens left to fill
+the tail, and (b) the step that just finished emitted at least a full short block's worth of
+tokens — twice in a row. A single saturated step happens inside ordinary prose and the block
+it buys is wasted; two in a row is a copy. The flags are read from a pinned copy that landed
+asynchronously, one step stale: reading them synchronously is a device synchronise on every
+decode step and measured 5%, more than the long block is worth on most work. vLLM only feeds
+the draft count back to the scheduler on the synchronous scheduling path, so this mode runs
+`--no-async-scheduling`; at batch 1 that costs under 1%.
+
+Against the same server with the long block disabled, the trigger is a gain on every task in
+the suite: +55% reproducing a document, +10% rewriting one, +2-3% on prose.
 
 **The proposal is fused with the drafter's, not substituted for it.** A match of at least
 `VLLM_DFLASH2_LOOKUP_NSTRONG` (8) tokens is taken on its own; a shorter one only if the
