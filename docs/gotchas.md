@@ -200,3 +200,37 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     fix is per-request draft counts, which `get_uniform_token_count` in
     `gpu/cudagraph_utils.py` will not dispatch a graph for — a ragged batch runs piecewise
     and costs 8%, more than the hold is worth.
+32. **Halving the KV element size can *cost* memory on a hybrid model with a draft model.**
+    `unify_kv_cache_spec_page_size` equalizes page sizes by scaling a layer's block size up by
+    the integer ratio `max_page / own_page`, and pads the *page* instead when that ratio is not
+    an integer. Sliding-window layers are born at the backend's smallest kernel block — 16 —
+    precisely because the code picking it assumes unify will scale it up
+    (`_largest_kernel_block_within` in `model_executor/layers/attention/attention.py`: "the
+    smallest block is fine — `unify` scales it up by an integer ratio"). When the ratio is not
+    an integer that assumption fails silently and every block of that layer pays a whole
+    primary page. Divisibility here holds at bf16 only by coincidence — the target's 4 KV heads
+    × 256 and the DFlash2 drafter's 8 × 128 both come to 4096 B per token per layer — and
+    `int8_per_token_head` breaks it by adding one fp32 scale *per head* (2080 vs 2112 B/token;
+    2112 = 2⁶·3·11 shares no factor with the primary page). The drafter's 5 layers then took
+    `cdiv(2047 + 4096, 16) + 1 = 385` blocks of 1.71 MiB at 1.88% utilisation — a constant
+    5.155 GiB, 75.6% of the per-request budget. Measured: int8 needed **6.82 GiB to serve
+    32,768 tokens** where bf16 serves 69,758 in 5.2 GiB, i.e. 2.4× worse from halving the
+    dtype. `patches/hybrid-sw-block-promote.patch` rounds such a layer's block *up* instead
+    (16 → 864), which turns that into 138,696 tokens. The tell in a log is an "estimated
+    maximum model length" that is a small multiple of 16.
+33. **The aligned recurrent-state pages scale with the verify block, not with the slot count.**
+    Gotcha 23 says "per request slot"; that is wrong. Measured by asking for an impossible
+    `max_model_len` and fitting the two numbers vLLM prints: the fixed term is 0.88 GiB at
+    `DFLASH_TOKENS=7` and 1.66 GiB at 15 — the ratio 0.53 is exactly 9/17, i.e. `(k+2)` — while
+    `MAX_SEQS` 1 against 8 moves it by about **8 MiB in total**. So dropping to one slot for a
+    genuinely single-user server buys no context at all, and `MAX_SEQS=4` at a long block is
+    about CUDA graph memory, not state pages.
+34. **Asking for an impossible `max_model_len` is the cheapest way to read the memory model.**
+    vLLM prints "X GiB KV cache is needed ... available Y GiB ... estimated maximum model
+    length is Z" and dies in ~90 s, before torch.compile finishes and long before graph
+    capture. Two such points give slope and intercept for `needed(context)`, and the slope
+    comes out at exactly `16 × 4 × 256 × 2 × 2 = 65,536` B/token for bf16 — so the fit can be
+    checked against arithmetic rather than trusted. Beware that `estimate_max_model_len` is a
+    binary search over `max_memory_usage_bytes`, which rounds up to whole blocks, so the
+    estimate is quantised by the block size: at an 864-token block the granularity is coarse
+    and a two-point inversion at small lengths is unreliable.

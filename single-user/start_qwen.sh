@@ -79,11 +79,21 @@ else
   DRAFT_TOKENS=${DRAFT_TOKENS:-3}
   ATTN_ARGS="--kv-cache-dtype fp8"
 fi
-if [ "$SPEC" = "dflash2" ]; then
-  if [ "$CTX" != "fast" ]; then
-    echo "SPEC=dflash2 is CTX=fast only (bf16 KV, FLASH_ATTN); CTX=$CTX keeps SPEC=mtp" >&2
-    SPEC=mtp
-  fi
+if [ "$SPEC" = "dflash2" ] && [ "$CTX" = "long" ]; then
+  # int8 per-token-head KV on the Triton backend: the same 5.2 GiB pool holds 136,429
+  # tokens instead of 69,758, because patches/hybrid-sw-block-promote.patch stops the
+  # drafter's 5 sliding-window layers from taking 385 nearly-empty blocks, and
+  # patches/spec-decode-attn-int8.patch lets the split-KV verify kernel read the quantized
+  # cache (vLLM's own Triton attention will not split KV for a multi-query verify, which
+  # is every step here, and costs 7.4 ms per layer at 128k against this kernel's 1.3).
+  # Costs prefill: 251 s to load a 112k document against FLASH_ATTN's ~112 s. With
+  # PREFIX_CACHE=1 only the first turn pays it (5.9 s afterwards), which is why this is a
+  # mode for a RAG or coding front-end that loads a document once, not for general chat.
+  ATTN_ARGS="--attention-backend TRITON_ATTN --kv-cache-dtype int8_per_token_head"
+  export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-1}
+elif [ "$SPEC" = "dflash2" ] && [ "$CTX" != "fast" ]; then
+  echo "SPEC=dflash2 supports CTX=fast (bf16/FLASH_ATTN, 64k) and CTX=long (int8/TRITON_ATTN, 128k); CTX=$CTX keeps SPEC=mtp" >&2
+  SPEC=mtp
 fi
 if [ "$SPEC" = "dflash2" ]; then
   if [ -z "$DRAFT" ]; then
@@ -130,9 +140,22 @@ if [ "$SPEC" = "dflash2" ]; then
   # something else on the card; KV_MEM= (empty) falls back to GPU_UTIL.
   #
   # A longer verify block costs pool twice: bigger CUDA graphs, and one aligned recurrent
-  # state page per request per speculative block. MAX_SEQS is what that scales with, so
-  # single-user mode keeps 4 slots when the block is long.
-  if [ "$DRAFT_TOKENS" -gt 7 ]; then
+  # state page per speculative block. That second term is what scales -- NOT the slot
+  # count: 1 slot and 8 slots differ by about 8 MiB in total, so cutting MAX_SEQS buys no
+  # context. Single-user mode keeps 4 slots when the block is long for the graphs.
+  if [ "$CTX" = "long" ]; then
+    # int8 KV: measured 136,429 tokens of pool at DFLASH_TOKENS=7 with prefix caching on
+    # (138,696 without), against bf16's 69,758 in the same pinned 5.2 GiB. DFLASH_TOKENS>7
+    # at this context is untested -- the graphs and the state pages both grow.
+    MAX_SEQS=${MAX_SEQS:-4}
+    MAX_LEN=${DFLASH_MAX_LEN:-131072}
+    KV_MEM=${KV_MEM-5583457484}
+    if [ "$DRAFT_TOKENS" -gt 7 ]; then
+      export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1900}
+    else
+      export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
+    fi
+  elif [ "$DRAFT_TOKENS" -gt 7 ]; then
     # 4 slots and 56k instead of 8 and 64k: the aligned state pages and the bigger decode
     # graphs are what the long block costs, and this is where they still fit next to the
     # 5.2 GiB pool (57,669 tokens). DFLASH_TOKENS=7 gets 8 slots and 64k back.

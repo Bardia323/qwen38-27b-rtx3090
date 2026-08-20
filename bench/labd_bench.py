@@ -10,6 +10,13 @@ the docs it is built from change. Run against a server started with SPEC=dflash2
 
   venv/bin/python bench/labd_bench.py <tag> [--ctx 20000] [--max-tokens 512]
                                       [--tasks copy,code,edit,quote,summary,qa]
+                                      [--corpus ~/bench/labd_corpus_long.txt]
+
+--corpus points at a different document. The frozen one is ~84k tokens, so anything past
+about --ctx 65000 silently measures a shorter prompt than you asked for; labd_corpus_long.txt
+is the same text followed by vLLM source (varied, so a suffix lookup gets no free matches
+from a repeated section) and its first 244,038 characters are byte-identical, which keeps
+every number taken at --ctx 20000 comparable.
 """
 import glob
 import json
@@ -20,7 +27,6 @@ import urllib.request
 
 KEY = open(os.path.expanduser("~/qwen-serving/api_key.txt")).read().strip()
 BASE = "http://127.0.0.1:18020"
-CORPUS = os.path.expanduser("~/bench/labd_corpus.txt")
 TAG = sys.argv[1] if len(sys.argv) > 1 else "run"
 
 
@@ -28,6 +34,7 @@ def arg(name, default):
     return sys.argv[sys.argv.index(name) + 1] if name in sys.argv else default
 
 
+CORPUS = os.path.expanduser(arg("--corpus", "~/bench/labd_corpus.txt"))
 CTX = int(arg("--ctx", 20000))
 MAXTOK = int(arg("--max-tokens", 512))
 
@@ -51,7 +58,13 @@ if not os.path.exists(CORPUS):
         text += "\n\n" + "\n\n".join(docs)
     os.makedirs(os.path.dirname(CORPUS), exist_ok=True)
     open(CORPUS, "w").write(text)
-doc = open(CORPUS).read()[: int(CTX * 3.6)]
+_full = open(CORPUS).read()
+_want = int(CTX * 3.6)
+if len(_full) < _want:
+    print(f"WARNING: {CORPUS} is {len(_full)} chars, --ctx {CTX} wants {_want}; "
+          f"the prompt will be shorter than you asked for. Use --corpus "
+          f"~/bench/labd_corpus_long.txt.", file=sys.stderr)
+doc = _full[:_want]
 
 ALL_TASKS = [
     ("copy", "Gengiv ordret de første 60 linjer af dokumentet. Ingen kommentarer, kun teksten."),

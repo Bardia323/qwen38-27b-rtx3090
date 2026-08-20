@@ -77,3 +77,63 @@ Triton backend catches up, it becomes the simpler choice; today KVarN is
 faster at long context and `int4_per_token_head` is faster on many short
 requests. To try it: `--kv-cache-dtype int4_per_token_head --attention-backend
 TRITON_ATTN --max-model-len 262144` (batch/start_qwen.sh: `KV=int4pth`).
+
+## DFlash2 past 64k (`SPEC=dflash2 CTX=long`)
+
+The block drafter was pinned to `CTX=fast` — bf16 KV on FlashAttention, 64k at
+`DFLASH_TOKENS=7` and 56k at 15 — because bf16 KV is 64 KB per token and the pinned
+5.2 GiB pool is exactly that much. `CTX=long` moves it to an `int8_per_token_head` cache
+on the Triton backend and roughly doubles the context:
+
+| | bf16 (`CTX=fast`) | int8 (`CTX=long`) |
+|---|---|---|
+| context, `DFLASH_TOKENS=7` | 69,758 tokens | **138,696** (136,429 with prefix caching) |
+| context, `DFLASH_TOKENS=15` | 57,669 | **114,224** |
+
+Two patches make that work, and neither changes anything at bf16:
+
+- **[hybrid-sw-block-promote.patch](../patches/hybrid-sw-block-promote.patch)** — without it,
+  int8 costs *more* memory than bf16, not less: 6.82 GiB to serve 32,768 tokens. vLLM equalizes
+  KV page sizes by scaling a layer's block size up by an integer ratio, and the drafter's five
+  sliding-window layers are born at the smallest kernel block, 16. That ratio is an integer at
+  bf16 only by coincidence — the target's 4 KV heads × 256 and the drafter's 8 × 128 both come
+  to 4096 B per token per layer — and a per-token-head cache breaks it by adding one fp32 scale
+  per head. The drafter's layers then keep a 16-token block while their page is padded to the
+  full 1.71 MiB primary page: 385 blocks at 1.88% utilisation, a constant 5.2 GiB. The patch
+  rounds those layers' block up (16 → 864) so their page covers the maximum instead.
+- **[spec-decode-attn-int8.patch](../patches/spec-decode-int8-kv.patch)** — the split-KV verify
+  kernel reads the quantized cache and is wired into the Triton backend, which otherwise cannot
+  split KV for a multi-query verify at all (`use_3d` is off whenever `max_seqlen_q > 1`, and
+  every DFlash2 step is a verify). Per attention layer at 128k, 8 query tokens: 1.3 ms for this
+  kernel against 7.4 ms for vLLM's unified attention and 10.1 ms for FA2.
+
+### What it is actually good for
+
+Measured against the option that already covers this context, on 112,655-token prompts
+(`bench/labd_bench.py --ctx 100000 --corpus ~/bench/labd_corpus_long.txt`), both with
+`PREFIX_CACHE=1`:
+
+| task | `SPEC=dflash2 CTX=long` (k=15) | `SPEC=mtp CTX=long` |
+|---|---|---|
+| reproduce the document verbatim | 14.19 tok/step, **154.8 tok/s** | 3.81, 101.4 |
+| list every command | 5.32, 69.8 | 3.52, **93.6** |
+| rewrite but keep | 5.09, 66.8 | 3.79, **100.6** |
+| quote and explain | 2.17, 34.6 | 2.75, **72.9** |
+| summarize | 2.17, 34.8 | 2.68, **71.4** |
+| answer a question | 2.01, 32.1 | 2.34, **61.9** |
+| all six | 3.10, 47.0 | 2.95, **78.6** |
+| TTFT, first turn / cached turn | 316.8 s / 6.1 s | **151.9 s / 2.4 s** |
+
+**So: +53% where the model reproduces its context, and about 2:1 behind everywhere else, with
+twice the TTFT.** `SPEC=mtp CTX=long` remains the better general long-context server, and it
+reaches 150k rather than 114k. Reach for `SPEC=dflash2 CTX=long` when the workload is a RAG
+front-end quoting sources or a coding assistant applying edits to a large file it has already
+loaded — where the answer is mostly text that is already in the prompt — and not otherwise.
+
+The lookup drafter itself does not decay with context: it accepts 14.19 of a possible 16
+tokens per step at 112k, against 15.0 at 25k and 50k. What costs the mode is the step, at
+91.7 ms against bf16's 48.2 ms at 50k — the Triton backend, the drafter's own five layers, and
+the int8 kernel's padded-stride penalty (its head dim is 260 B, so odd KV heads start off a
+16-byte boundary; ~13% end to end, and reading the cache as int32 instead would recover most
+of it). Prefill is the larger cost and this kernel cannot help there — a prefill chunk is 2048
+query tokens, far above the block sizes it is for.
