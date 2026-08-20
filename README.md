@@ -2,17 +2,6 @@
 
 ![Stock vLLM against this repo, same card, same prompts](docs/media/demo.gif)
 
-<sub>Three prompts on one RTX 3090 at 250 W, each answer run to its own stop token:
-a chat answer, a code answer, and reproducing a 25k-token document. Left is plain
-`vllm serve` with no speculative decoding; right is
-`SPEC=dflash2 DFLASH_TOKENS=15 PREFIX_CACHE=1`. Measured **47.4 → 151.7**,
-**46.9 → 241.0** and **42.3 → 359.2 tok/s**. There is one GPU, so the two
-configurations cannot run at once: each lane was recorded separately with per-token
-arrival times and replayed side by side at its real speed (`bench/demo_capture.py`,
-then `bench/demo_render.py`). The two answers are close but not identical, because
-the right lane also runs the int4-GPTQ lm_head from the fast variant and the left
-one does not — speculative decoding itself is exact and changes only the speed.</sub>
-
 Serving setup for [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) on a
 single 24 GB consumer GPU with vLLM. 150k token context, OpenAI-compatible
 API with key auth, and two ready-made configs depending on what you're doing:
