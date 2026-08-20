@@ -254,7 +254,7 @@ Written against vLLM 0.27.1.
              self.selector_top_k,
              dtype=torch.float32,
              device=device,
-@@ -167,14 +185,129 @@
+@@ -167,14 +185,160 @@
              dtype=torch.float32,
              device=device,
          )
@@ -328,6 +328,28 @@ Written against vLLM 0.27.1.
 +        ).pin_memory()
 +        self._flags_n = 0
 +        self._prev_want = False
++        # Entering the long block takes two qualifying steps in a row and leaving it took
++        # one, so a single step where the flag dropped out mid-copy cost three. It drops out
++        # for reasons that have nothing to do with the copy ending -- a line the lookup
++        # cannot match, or a flag copy that had not landed yet -- and the same server then
++        # measured 13.76, 13.92, 13.92, 13.92 and 13.92 tokens per step on consecutive runs
++        # of one prompt against 14.97 on the first. STICKY holds the long block for that
++        # many steps after the flag goes out, which makes it 15.21 every time.
++        #
++        # Gating the hold on "the request is still emitting a full block a step" -- which
++        # should distinguish a late flag from a finished copy -- removes the whole effect
++        # (13.92 again): by the time the flag drops the step it describes was not saturated
++        # either, so the two are not independent evidence.
++        #
++        # It only applies with one request in flight, and that restriction is not caution.
++        # This counter is one number for the whole batch, and unlike the entry condition it
++        # keeps the long block on through steps where the flags say no -- so with several
++        # requests, which block length a copying request gets starts to depend on when the
++        # others arrived. Different block length, different rounding, different greedy text:
++        # bench/labd_soak.py caught a verbatim copy coming out differently in two rounds of
++        # an otherwise identical 4-way batch, and reproducibly did not with STICKY=0.
++        self._lookup_sticky = int(os.environ.get("VLLM_DFLASH2_LOOKUP_STICKY", "3"))
++        self._sticky = 0
 +
 +        if self._lookup:
 +            logger.info(
@@ -376,7 +398,16 @@ Written against vLLM 0.27.1.
 +        # middle of ordinary prose (a quoted phrase, a repeated list marker) and the long
 +        # block it buys is then wasted. Waiting for the second one costs the first step of
 +        # a copy and removes the loss on quote-and-explain work.
-+        long_block, self._prev_want = want and self._prev_want, want
++        if want and self._prev_want:
++            long_block = True
++            self._sticky = self._lookup_sticky if num_reqs == 1 else 0
++        elif self._sticky > 0 and num_reqs == 1:
++            # Coasting: re-entry costs two steps, so a run that has already earned the long
++            # block twice gets the benefit of the doubt for a few more.
++            long_block, self._sticky = True, self._sticky - 1
++        else:
++            long_block, self._sticky = False, 0
++        self._prev_want = want
 +        return self.num_speculative_steps if long_block else self.draft_block
 +
 +    def set_req_states(self, req_states) -> None:
@@ -385,7 +416,7 @@ Written against vLLM 0.27.1.
  
      def set_sampling_states(self, sampling_states) -> None:
          self._req_top_p = sampling_states.top_p.gpu
-@@ -199,7 +332,7 @@
+@@ -199,7 +363,7 @@
              self._selector_scores,
              self._req_top_p if truncate else self.temperature,
              self._req_top_k if truncate else self.sample_idx_mapping,
@@ -394,7 +425,7 @@ Written against vLLM 0.27.1.
              top_k=self.selector_top_k,
              BLOCK_K=block_k,
              USE_FP64=self.use_fp64_gumbel,
-@@ -219,7 +352,8 @@
+@@ -219,7 +383,8 @@
              self.sample_idx_mapping,
              draft_logits.stride(0),
              draft_logits.stride(1),
@@ -404,7 +435,7 @@ Written against vLLM 0.27.1.
              top_k=self.selector_top_k,
              BLOCK_K=block_k,
              num_warps=1,
-@@ -241,15 +375,15 @@
+@@ -241,15 +406,15 @@
              num_tokens_across_dp,
              cudagraph_runtime_mode,
          )
@@ -423,7 +454,7 @@ Written against vLLM 0.27.1.
          )
          unary_logits = unary_logits.view_as(candidate_ids)
          anchor_token_ids = self.input_buffers.input_ids[self._anchor_indices[:num_reqs]]
-@@ -261,4 +395,67 @@
+@@ -261,4 +426,67 @@
          )
          self._sample_path(candidate_ids, scores, num_reqs)
          self._cache_draft_logits(candidate_ids, num_sample)

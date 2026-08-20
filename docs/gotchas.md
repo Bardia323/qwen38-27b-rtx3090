@@ -154,3 +154,49 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     the same work, on every short step. `cudagraph_utils.py` already knows how to capture
     several decode lengths (it does it for dynamic speculative decoding); the lookup patch
     adds the drafter's block to that list. Costs 1.8 GiB of graphs instead of 1.45.
+28. **A verify block costs step time in steps, not smoothly, and the two stairs are at 16
+    and 21 query tokens.** Measured on a copy at 25k context: 39.5 ms per step at 16 query
+    tokens (`DFLASH_TOKENS=15`), 47.8 at 19, 47.2 at 21 — a jump between 16 and 19 and then
+    flat. The first stair is the target's W4A16 GEMMs: GPTQ-Marlin tiles the M dimension in
+    16 rows (`m_block_size = 16 * thread_m_blocks`, `thread_m_blocks = div_ceil(prob_m,
+    16)`), so a 17th query token buys a second M block in all 64 layers and the tokens up to
+    32 are then free. The second is the verify attention: `SpecDecodeAttention._plan`
+    (patches/spec-decode-attn.patch) puts `q_len * G` rows in a 128-row tile, so with this
+    model's `G = 24/4 = 6` one tile holds `128 // 6 = 21` query tokens and a 22nd re-reads
+    the request's whole KV segment (250/583/1132 us per layer at 8/16/32).
+    So there are exactly two sensible block lengths — 16 query tokens, the last one on the
+    bottom stair, and 21, the most tokens obtainable for the price of the second. 31 pays
+    both stairs and was never worth measuring; two attempts to start it died on memory
+    first.
+29. **A verify block that outgrows its CUDA-graph reservation OOMs at run time, not at
+    startup.** `--kv-cache-memory` pins the pool, so `VLLM_V2_CUDAGRAPH_MEM_MIB` no longer
+    sizes it — it only reserves headroom, and if it under-reserves, the server starts, logs a
+    healthy pool, and then dies on the first prefill with 50 MiB left. Graph memory grows
+    with the block: measured 1.82 GiB at `DFLASH_TOKENS=15`, 2.12 at 18, 2.27 at 20 (the
+    capture list length barely matters — 2.21 GiB at 20 with `CG` cut from 63 to 42). Budget
+    a request as `64 KiB * context + 102 MiB * (DFLASH_TOKENS + 2)`, the second term being
+    the aligned recurrent-state pages, and take the extra graph memory out of the pool.
+30. **The draft model is not redundant during a copy, even when the lookup overwrites every
+    token it proposed.** It looks like free money: on a step the lookup controller selected,
+    a qualifying match is long enough to take the head of the block too, so all seven of the
+    drafter's tokens are replaced before anything is verified — skip its forward and save
+    ~3 ms of a 39 ms step. Measured, that trade loses: 15.21 tokens per step becomes 13.79
+    for a 5% cheaper step, a net 6% down. The drafter is covering the positions *past the
+    end of the match*, which is exactly where a copy lands when the text it is reproducing
+    diverges. Restricting the skip to steps where the match reaches the end of the block
+    recovers the acceptance but only two runs in three — the flag it keys on is one step
+    stale, and a stricter condition is more sensitive to that. Both variants are gone; this
+    entry is here so the idea does not look untried.
+31. **Any controller state that outlives one step has to be per-request, or batch > 1 stops
+    being reproducible.** The lookup's block-length decision is batch-wide by design — a long
+    block costs step time on every request in the batch — and taking it from the current
+    step's flags is fine, because those are a function of the requests present. Holding it
+    across steps is not: `VLLM_DFLASH2_LOOKUP_STICKY` keeps the long block on through steps
+    where the flags say no, so with several requests in flight the block length a copying
+    request gets depends on when the *others* arrived, and the block is one chunk through the
+    recurrent layers, so that changes its greedy text. `bench/labd_soak.py` caught a verbatim
+    copy coming out differently in two rounds of an identical four-way batch, and OK in three
+    of three with the hold off. It is now applied only with one request in flight. The proper
+    fix is per-request draft counts, which `get_uniform_token_count` in
+    `gpu/cudagraph_utils.py` will not dispatch a graph for — a ragged batch runs piecewise
+    and costs 8%, more than the hold is worth.

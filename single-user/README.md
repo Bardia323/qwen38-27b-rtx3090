@@ -152,6 +152,37 @@ finished emitted at least a full short block's worth of tokens, twice in a row. 
 saturated step happens in the middle of ordinary prose — a quoted phrase, a repeated list
 marker — and the block it would buy is then wasted; two in a row is a copy.
 
+Leaving is not the mirror of entering. The flag drops out for reasons that have nothing to do
+with the copy ending — a line the lookup cannot match, or a flag copy that had not landed yet
+— and dropping the long block immediately costs the two steps needed to earn it back, so it
+is held for `VLLM_DFLASH2_LOOKUP_STICKY` (3) steps more. That is not a tuning knob for the
+average; it is what makes the mode reproducible. Six consecutive runs of the same prompt on
+one server, tokens per step / decode tok/s:
+
+| 25k-token document, greedy | hold off | hold on (default) |
+|---|---|---|
+| reproduce the first 60 lines verbatim | 13.92 ×6 / 362 | **15.21 ×6 / 379 (+5%)** |
+| "quote and explain" | 2.86 ×6 / 93 | **2.87–3.44 / 105 mean (+12%)** |
+| free-form summary | 2.13 / 71.1 | 2.13 / 71.1 |
+| free-form Q&A | 2.02 / 68.3 | 2.02 / 68.2 |
+
+Free-form prose is untouched, which is what the entry condition guarantees: it never produces
+two saturated steps in a row, so the hold is never armed. Gating the hold on "the request is
+still emitting a full block a step" — which ought to tell a late flag from a finished copy —
+removes the whole effect instead, because by the time the flag drops the step it describes
+was not saturated either.
+
+**The hold only applies with one request in flight**, and that is not caution. The counter is
+one number for the whole batch, and unlike the entry condition it keeps the long block on
+through steps where the flags say no — so with several requests, which block length a copying
+request gets starts to depend on when the others arrived. Different block length, different
+rounding, different greedy text: `bench/labd_soak.py` caught a verbatim copy coming out
+differently in two rounds of an otherwise identical four-way batch, and reproducibly did not
+with the hold off. Per-request block lengths would fix it properly, but the V2 runner's
+CUDA-graph dispatch needs one query length for the whole batch
+(`cudagraph_utils.py: get_uniform_token_count`), so a ragged batch loses its decode graphs
+and pays more than the hold is worth.
+
 | 25k-token document, greedy | default (`DFLASH_TOKENS=7`) | `DFLASH_TOKENS=15` |
 |---|---|---|
 | reproduce the first 60 lines verbatim | 7.83 / 260 | **14.97 / 381 (+47%)** |
@@ -169,9 +200,10 @@ text divergence produces between any two drafter configurations here.
 
 Three things had to be true for that. The long block is only *scheduled* while a copy is
 running — the lookup has something for the tail and the step that just finished emitted at
-least a full short block's worth of tokens, two steps in a row to start and two to stop. The
-flag is read from a pinned copy that landed asynchronously; reading it synchronously is a
-device synchronise per decode step and costs 5%. And decode CUDA graphs are captured for
+least a full short block's worth of tokens, two steps in a row to start, and three more of
+coasting before it stops when there is one request in flight. The flag is read from a pinned
+copy that landed asynchronously; reading it synchronously is a device synchronise per decode
+step and costs 5%. And decode CUDA graphs are captured for
 *both* block lengths: `decode_query_len` only described the long one, so every short step —
 the common case — fell back to piecewise and paid 8% (27.9 ms against 25.9 ms for the same
 8-token step on a 7-slot server).
@@ -181,7 +213,10 @@ Reproduction mode also costs KV pool per request slot rather than per token
 4 slots and 56k of context instead of 8 and 64k.
 
 Quality is unchanged: GSM8K 96.5% (200 questions, greedy) with the lookup on, the same as
-without it. Greedy *text* matches on 7 of 9 long prompts against the same server with
+without it, and 96.0% with the hold — one question, which is what a 200-question sample
+resolves. `bench/labd_soak.py` is the check that matters for the parts of this that are
+decided for the whole batch: it runs a verbatim copy inside a mixed four-way batch and
+insists it comes out the same in every round. Greedy *text* matches on 7 of 9 long prompts against the same server with
 `LOOKUP=0`; the two that differ are near-tie flips of the kind any drafter change produces
 here (the block is one chunk through the recurrent layers, so changing what is in it changes
 the last bits of the logits — gotcha 14), not a change of distribution: the lookup's
@@ -304,7 +339,7 @@ Point your chat client at `http://<host>:18020/v1` with the key from
 | `MODEL` | `models/Qwen3.8-27B-W4A16-AutoRound-fast` if present, else the base dir | the fast variant (`fetch_fast_variant.py`) is +15% |
 | `CTX` | `fast` | `fast`: bf16 KV / FlashAttention / 64k / 4 drafts / split-KV attention. `long`: fp8 KV / FlashInfer / 150k / 3 drafts, ~15% slower at C1, faster from C4 up. `huge`: KVarN 4/2-bit KV / 200k / 3 drafts (needs `bash kvarn/install.sh`; docs/long-context.md) |
 | `PREFIX_CACHE` | 0 | 1 = reuse a shared prompt prefix across requests (`--enable-prefix-caching --mamba-cache-mode align`): 20x faster follow-up turns, ~16% smaller KV pool |
-| `LOOKUP` | 1 (`SPEC=dflash2`) | draft from the request's own context when it repeats itself (`patches/dflash2-lookup-drafting.patch`), and fill the verify positions the drafter's block does not reach. `VLLM_DFLASH2_LOOKUP_NMIN` (4) is the shortest suffix that may match, `_NMAX` (32) the longest, `_NSTRONG` (8) the match length trusted on its own, `_AGREE` (2) how many tokens the drafter must independently agree on for a shorter match to be taken, `_ADAPTIVE` (1 = ask the scheduler for the long block only while a copy is running, 0 = always long), `_LONGMIN` (6) the match length that counts as a fillable tail, `_CHEAP_CTX` (0 = off) a context length below which the long block is taken unconditionally |
+| `LOOKUP` | 1 (`SPEC=dflash2`) | draft from the request's own context when it repeats itself (`patches/dflash2-lookup-drafting.patch`), and fill the verify positions the drafter's block does not reach. `VLLM_DFLASH2_LOOKUP_NMIN` (6) is the shortest suffix that may match, `_NMAX` (12) the longest — the kernel prefers the longest match and breaks ties by recency, so a higher cap makes it choose an older long match over a newer short one, which is the worse predictor — `_NSTRONG` (6) the match length trusted on its own, `_AGREE` (0) how many tokens the drafter must independently agree on for a shorter match to be taken, `_NMIN_TAIL` (4) the same for positions the drafter never proposed, `_ADAPTIVE` (1 = ask the scheduler for the long block only while a copy is running, 0 = always long), `_LONGMIN` (6) the match length that counts as a fillable tail, `_STICKY` (3) steps to hold the long block after the flag drops, with one request in flight only — copies do not end when the flag says so, and re-entry costs two steps, but the counter is batch-wide and holding it across a mixed batch makes the block length depend on when the other requests arrived — `_CHEAP_CTX` (0 = off) a context length below which the long block is taken unconditionally |
 | `SPEC` | `mtp` | `dflash2`: the DFlash2 block drafter (`fetch_dflash2.py`; `CTX=fast` only, V2 model runner). `DRAFT` overrides the drafter dir, `DFLASH_TOKENS` (7) the *verify* block — the drafter always proposes the 7 it was trained for, and 15 here is reproduction mode (4 request slots, 56k context) — `DFLASH_MAX_LEN` (65536, or 57344 at `DFLASH_TOKENS=15`) the context, `KV_MEM` (5583457484 = 5.2 GiB) pins the KV pool — set `KV_MEM=` to size it from `GPU_UTIL` instead; `VLLM_DFLASH2_DRAFT_TOPK_TOPP=0` disables the proposal truncation, `VLLM_DFLASH2_TORCH_TOPK=1` avoids the FlashInfer top-k JIT |
 | `DRAFT_TOKENS` | 4 (3 for `CTX=long`/`huge`) | speculative depth; 5 and 6 are slower |
 | `SPEC_ATTN` | 1 (`CTX=fast` only) | split-KV Triton attention for the verify step (`patches/spec-decode-attn.patch`); 0 = FlashAttention-2 |
