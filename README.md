@@ -1,5 +1,18 @@
 # Qwen3.8-27B on one RTX 3090
 
+![Stock vLLM against this repo, same card, same prompts](docs/media/demo.gif)
+
+<sub>Three prompts on one RTX 3090 at 250 W, each answer run to its own stop token:
+a chat answer, a code answer, and reproducing a 25k-token document. Left is plain
+`vllm serve` with no speculative decoding; right is
+`SPEC=dflash2 DFLASH_TOKENS=15 PREFIX_CACHE=1`. Measured **47.4 → 151.7**,
+**46.9 → 241.0** and **42.3 → 359.2 tok/s**. There is one GPU, so the two
+configurations cannot run at once: each lane was recorded separately with per-token
+arrival times and replayed side by side at its real speed (`bench/demo_capture.py`,
+then `bench/demo_render.py`). The two answers are close but not identical, because
+the right lane also runs the int4-GPTQ lm_head from the fast variant and the left
+one does not — speculative decoding itself is exact and changes only the speed.</sub>
+
 Serving setup for [Qwen3.8-27B](https://huggingface.co/Qwen/Qwen3.8-27B) on a
 single 24 GB consumer GPU with vLLM. 150k token context, OpenAI-compatible
 API with key auth, and two ready-made configs depending on what you're doing:
@@ -11,18 +24,6 @@ API with key auth, and two ready-made configs depending on what you're doing:
 | single-stream (C1) decode rate, realistic prompts | 46 tok/s | MTP: **114** tok/s at default sampling, **118** greedy (`CTX=fast`, 64k; 85 / 89 with `CTX=long`, 150k). DFlash2 (`SPEC=dflash2`): **122** default, **132** greedy |
 | reproducing its own context (quoting a document, applying an edit) | 46 tok/s | **381 tok/s** at 25k context — 15.0 tokens per verify step, drafted straight from the prompt (`SPEC=dflash2` + `DFLASH_TOKENS=15`) |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) with a verify block the context fills |
-
-![Stock vLLM against this repo, same card, same prompts](docs/media/demo.gif)
-
-<sub>Three prompts on one RTX 3090 at 250 W: a chat answer, a code answer, and
-reproducing a 25k-token document. Left is plain `vllm serve` with no speculative
-decoding; right is `SPEC=dflash2 DFLASH_TOKENS=15 PREFIX_CACHE=1`. Measured
-**47.4 → 86.6**, **47.2 → 241.2** and **42.5 → 379.0 tok/s**. There is one GPU, so
-the two configurations cannot run at once: each lane was recorded separately with
-per-token arrival times and replayed side by side at its real speed
-(`bench/demo_capture.py`, then `bench/demo_render.py`). Both lanes are greedy and
-end on identical text — which is the point, speculation changes the speed and not
-the output.</sub>
 
 Both modes share one install — the mode is just which launch script you run.
 Speculation wins below ~8 concurrent users, plain batching above. Numbers are

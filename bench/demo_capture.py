@@ -34,25 +34,31 @@ DOC_TOKENS = 25000
 _corpus = os.path.expanduser("~/bench/labd_corpus.txt")
 doc = open(_corpus).read()[: int(DOC_TOKENS * 2.9)] if os.path.exists(_corpus) else ""
 
+# English throughout: the demo is the repo's front page, and the frame should be
+# readable by anyone landing on it. No max_tokens -- each answer runs to its own
+# stop token, so the video shows real completions rather than a truncation point
+# chosen to flatter one lane.
 PROMPTS = [
-    ("chat", "Chat", 320,
-     "Forklar kort hvorfor et 24 GB grafikkort er en hård begrænsning når man "
-     "kører en 27B-model, og hvad man kan gøre ved det."),
-    ("code", "Code", 320,
+    ("chat", "Chat",
+     "Explain briefly why 24 GB of VRAM is a hard constraint when serving a 27B "
+     "model, and what can be done about it."),
+    ("code", "Code",
      "Write a Python function that merges overlapping intervals. Include a short "
      "docstring and three test cases."),
-    ("copy", "Reproduce a 25k-token document", 400,
-     "Dokument:\n\n" + doc + "\n\nGengiv ordret de første 60 linjer af dokumentet. "
-     "Ingen kommentarer, kun teksten."),
+    ("copy", "Reproduce a 25k-token document",
+     "Document:\n\n" + doc + "\n\nReproduce the first 60 lines of the document "
+     "verbatim. No commentary, just the text."),
 ]
 
 
-def run(key, label, max_tokens, content):
+def run(key, label, content, max_tokens=None):
     payload = {"model": "qwen3.8-27b",
                "messages": [{"role": "user", "content": content}],
-               "max_tokens": max_tokens, "temperature": 0, "stream": True,
+               "temperature": 0, "stream": True,
                "stream_options": {"include_usage": True},
                "chat_template_kwargs": {"enable_thinking": False}}
+    if max_tokens:
+        payload["max_tokens"] = max_tokens
     req = urllib.request.Request(BASE + "/v1/chat/completions",
                                  data=json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json",
@@ -93,7 +99,7 @@ def run(key, label, max_tokens, content):
 
 
 # One short warm-up so Triton/graph JIT does not land inside the first measured prompt.
-run("warm", "warmup", 32, "Skriv én sætning om vejret.")
+run("warm", "warmup", "Write one sentence about the weather.", max_tokens=32)
 
 results = [run(*p) for p in PROMPTS]
 os.makedirs(OUT, exist_ok=True)

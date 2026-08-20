@@ -23,6 +23,7 @@ W, H = 940, 530
 PAD = 16
 COL_W = (W - PAD * 3) // 2
 HOLD_S = 1.6          # freeze at the end of each prompt so the result is readable
+TITLE_S = 1.0         # title card between prompts, so the change of prompt is obvious
 BODY_LINES = 13
 
 BG = (13, 17, 23)
@@ -104,15 +105,21 @@ def wrap(text, cols):
     return out
 
 
-def panel(d, x, lane, prompt, t_ms, done, cols):
+def panel(d, x, lane, prompt, t_ms, cols):
     title, sub, accent = lane
-    d.rounded_rectangle([x, 64, x + COL_W, H - 46], 8, fill=CARD, outline=EDGE)
-    d.text((x + 14, 76), title, font=F_H1, fill=accent)
-    d.text((x + 14, 98), sub, font=F_SM, fill=DIM)
+    # A lane that has stopped generating must stop its clock too, or it keeps
+    # counting while the other lane finishes and the elapsed time is a lie.
+    end_ms = prompt["tokens"][-1][0]
+    done = t_ms >= end_ms
+    t_ms = min(t_ms, end_ms)
+
+    d.rounded_rectangle([x, 92, x + COL_W, H - 46], 8, fill=CARD, outline=EDGE)
+    d.text((x + 14, 104), title, font=F_H1, fill=accent)
+    d.text((x + 14, 126), sub, font=F_SM, fill=DIM)
 
     text, n, i = visible(prompt, t_ms)
     lines = wrap(text, cols)[-BODY_LINES:]
-    y = 124
+    y = 152
     for ln in lines:
         d.text((x + 14, y), ln, font=F_BODY, fill=FG)
         y += 15
@@ -125,7 +132,8 @@ def panel(d, x, lane, prompt, t_ms, done, cols):
     d.text((x + COL_W - 150, ry + 2), f"{n:4d} / {prompt['n_out']} tokens", font=F_H2, fill=DIM)
     d.text((x + COL_W - 150, ry + 18), f"{t_ms / 1000.0:5.2f} s", font=F_H2, fill=DIM)
     if done:
-        d.text((x + 14, ry + 34), f"avg {prompt['decode_tok_s']:.1f} tok/s", font=F_H2, fill=accent)
+        d.text((x + 14, ry + 34), f"done — avg {prompt['decode_tok_s']:.1f} tok/s",
+               font=F_H2, fill=accent)
     return rate
 
 
@@ -143,8 +151,31 @@ def main():
              ("This repo", "SPEC=dflash2  DFLASH_TOKENS=15  PREFIX_CACHE=1", GREEN))
     cols = (COL_W - 28) // 7
 
-    idx = 0
-    for pa, pb in zip(map(prepare, a["prompts"]), map(prepare, b["prompts"])):
+    prompts = list(zip(map(prepare, a["prompts"]), map(prepare, b["prompts"])))
+    n_prompts = len(prompts)
+    frame = 0
+
+    def save(img):
+        nonlocal frame
+        img.save(f"{frames_dir}/f{frame:05d}.png")
+        frame += 1
+
+    for idx, (pa, pb) in enumerate(prompts):
+        # Title card: without a hard break between prompts the panels just refill
+        # and it is not obvious a new prompt started.
+        for _ in range(int(TITLE_S * FPS)):
+            img = Image.new("RGB", (W, H), BG)
+            d = ImageDraw.Draw(img)
+            tag = f"PROMPT {idx + 1} OF {n_prompts}"
+            d.text((W / 2 - d.textlength(tag, font=F_H2) / 2, H / 2 - 54), tag,
+                   font=F_H2, fill=CYAN)
+            d.text((W / 2 - d.textlength(pa["label"], font=F_BIG) / 2, H / 2 - 26),
+                   pa["label"], font=F_BIG, fill=FG)
+            sub = f"{pa['prompt_tokens']:,} prompt tokens"
+            d.text((W / 2 - d.textlength(sub, font=F_H2) / 2, H / 2 + 18), sub,
+                   font=F_H2, fill=DIM)
+            save(img)
+
         span = max(pa["tokens"][-1][0], pb["tokens"][-1][0])
         total = span / 1000.0 + HOLD_S
         for f in range(int(total * FPS) + 1):
@@ -153,11 +184,15 @@ def main():
             d = ImageDraw.Draw(img)
 
             d.text((PAD, 16), "Qwen3.8-27B on one RTX 3090 @ 250 W", font=F_H1, fill=FG)
-            d.text((PAD, 40), f"prompt {idx + 1}/3 — {pa['label']}"
-                              f"   ({pa['prompt_tokens']:,} prompt tokens)", font=F_H2, fill=DIM)
+            pill = f" PROMPT {idx + 1}/{n_prompts} · {pa['label'].upper()} "
+            pw = d.textlength(pill, font=F_H2)
+            d.rounded_rectangle([PAD, 44, PAD + pw + 8, 66], 6, fill=CARD, outline=CYAN)
+            d.text((PAD + 4, 48), pill, font=F_H2, fill=CYAN)
+            d.text((PAD + pw + 20, 48), f"{pa['prompt_tokens']:,} prompt tokens",
+                   font=F_H2, fill=DIM)
 
-            ra = panel(d, PAD, lanes[0], pa, t_ms, t_ms >= pa["tokens"][-1][0], cols)
-            rb = panel(d, PAD * 2 + COL_W, lanes[1], pb, t_ms, t_ms >= pb["tokens"][-1][0], cols)
+            ra = panel(d, PAD, lanes[0], pa, t_ms, cols)
+            rb = panel(d, PAD * 2 + COL_W, lanes[1], pb, t_ms, cols)
 
             # Only once BOTH lanes have finished: a live ratio would divide the
             # finished lane's final average by the running lane's instantaneous dip
@@ -168,8 +203,7 @@ def main():
                        note, font=F_H1, fill=CYAN)
             d.text((PAD, H - 32), "recorded separately, replayed at true speed",
                    font=F_SM, fill=DIM)
-            img.save(f"{frames_dir}/f{idx:02d}_{f:05d}.png")
-        idx += 1
+            save(img)
 
     pat = f"{frames_dir}/f*.png"
     pal = f"{frames_dir}/pal.png"
