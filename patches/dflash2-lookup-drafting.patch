@@ -910,7 +910,7 @@ Written against vLLM 0.27.1.
          # Post-step KV connector related operations.
 --- a/v1/worker/gpu/cudagraph_utils.py
 +++ b/v1/worker/gpu/cudagraph_utils.py
-@@ -219,6 +219,34 @@
+@@ -219,7 +219,34 @@
              ]
          else:
              decode_query_lens = [self.decode_query_len]
@@ -941,7 +941,7 @@ Written against vLLM 0.27.1.
 +                        "and the full verify block).",
 +                        decode_query_lens,
 +                    )
-+
+ 
          for num_tokens, num_active_loras in product(
              capture_sizes, self.lora_capture_cases
          ):
