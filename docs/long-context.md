@@ -18,28 +18,60 @@ fork of vLLM 0.23; [kvarn/](../kvarn/) is our port of its dense backend onto the
 or `CTX=huge` in single-user mode).
 
 Measured on the 3090 (`--kv-cache-dtype kvarn_k4v2_g128 --block-size 128`,
-fp16 recurrent state, batch defaults otherwise):
+fp16 recurrent state, batch defaults otherwise). **Every row in this table is the
+batch config, which runs no speculative decoding** — `ms/token` is `vllm bench
+serve`'s mean TPOT, so one model step per output token. Single-user mode
+speculates, and its numbers are in the next table; do not compare across the two.
 
-| | fp8 KV (default) | KVarN k4v2 |
+| batch mode (no speculation) | fp8 KV (default) | KVarN k4v2 |
 |---|---|---|
 | KV pool, batch mode | ~205-225k tokens (150k max, ~195k ceiling) | 302-344k tokens with 64 slots, **420k with 4 slots — 262k fits with room for 1.6 such requests** |
 | KV pool, single-user mode (MTP-3, `CTX=long`/`huge`) | 150k max | 200k max |
 | needle-in-a-haystack, greedy | — | correct at 4k / 16k / 30k / 100k / 240k, both depths |
 | perplexity (en/da/code, 33k tokens) | 8.223 | 8.236 (+0.16%) |
 | prefill, 1k / 16k / 100k inputs | 1,812 / 1,595 / 997 tok/s | 1,741 / 1,569 / 1,050 tok/s (same within ±5%) |
-| single stream at 100k context | TTFT 99 s, 27 ms/token | TTFT 94 s, 33 ms/token |
+| single stream at 100k context | TTFT 99 s, 27 ms/token | TTFT 94 s, 33 ms/token (1.22×) |
 | 4 × 60k-token requests, 1,024 out | only 3 fit → 256 s total, ITL 33 ms | all 4 resident → 242 s total, ITL 49 ms |
 | 64 concurrent short requests (128/512) | 876 tok/s | 692 tok/s (38 resident: 2048-token blocks cost as much per short request as fp8's 800-token block) |
-| MTP-3 single stream, real prompts (base variant, earlier draft vocab) | 84 / 89 tok/s | 79 / 88 tok/s |
 
-So: same VRAM, 1.6-2× the tokens, full 262k context, quality intact, prefill
-unchanged, and a speed tax of ~20% on long-context decode and more on
-short-request throughput (the fp16 staging pool for tiles-in-progress and the
-2048-token block granularity are the costs). Which is why it's a mode and not
-the default — nothing changes unless you set `KV=kvarn` (batch) or `CTX=huge`
-(single-user); the KV-cache format is an engine-level choice in vLLM, so it
-can't be switched per request. Port notes and what to watch when bumping vLLM
-are in [kvarn/README.md](../kvarn/README.md).
+### What it costs in single-user mode, which is where it hurts
+
+The 1.22× above is batch mode at 100k. Single-user mode speculates, and the tax is
+much larger there — reported in [#11](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/11)
+and reproduced here. MTP-3, one request, 112,648-token prompts, `PREFIX_CACHE=1`,
+two general tasks (summarize, answer-a-question), streamed so prefill is excluded
+(`bench/labd_bench.py <tag> --ctx 100000 --corpus ~/bench/labd_corpus_long.txt
+--tasks qa,summary`) — the only variable is `--kv-cache-dtype`:
+
+| single-user, MTP-3, 112k context | fp8 (`CTX=long`) | KVarN (`CTX=huge`) |
+|---|---|---|
+| KV pool | 174,489 tokens | 292,035 |
+| decode, summarize | 71.4 tok/s | 33.1 |
+| decode, answer a question | 64.9 | 30.8 |
+| **decode, both** | **68.1 tok/s — 14.7 ms/token** | **32.0 tok/s — 31.3 ms/token (2.13×)** |
+| accepted tokens per step | 2.56 | 2.38 |
+| TTFT, cold | 152.2 s | 146.7 s |
+
+Two things worth separating out of that 2.13×. About 1.98× is raw step time. The rest
+is acceptance: KVarN costs ~7% of it (2.38 against 2.56 tokens per step), because the
+quantized cache shifts the target's logits enough that the draft head agrees less often.
+Speculation stays exact — the sampled distribution is unchanged, and perplexity moves
++0.16% — but acceptance feeds straight back into throughput, so "quality-neutral" does
+not imply "speed-neutral" for a speculating server.
+
+For a short-prompt chat load the gap nearly closes: MTP-3 on real prompts reads
+84 / 89 tok/s at fp8 against 79 / 88 with KVarN (base variant, earlier draft vocab),
+about 1.06×. The tax is a function of context length, not a constant.
+
+So: same VRAM, 1.6-2× the tokens, full 262k context, output quality intact, prefill
+unchanged — and a decode tax that runs from ~6% on short single-user prompts through
+1.22× in batch mode at 100k to **2.13× in single-user mode at 112k**. Past ~100k of
+context you are buying 1.7× the context for less than half the decode rate, which is
+worth it when the alternative is not fitting the request at all and a bad trade
+otherwise. Which is why it's a mode and not the default — nothing changes unless you
+set `KV=kvarn` (batch) or `CTX=huge` (single-user); the KV-cache format is an
+engine-level choice in vLLM, so it can't be switched per request. Port notes and what
+to watch when bumping vLLM are in [kvarn/README.md](../kvarn/README.md).
 
 (vLLM 0.27.1 also has TurboQuant built in — `--kv-cache-dtype turboquant_4bit_nc`
 gives a similar 413k-token pool here and about 15% slower decode, but its
@@ -54,9 +86,10 @@ vLLM 0.27.1 also ships `int8_per_token_head`, `fp8_per_token_head` and
 rotation and asymmetric zero-points), all only in the Triton attention
 backend. Measured on the 3090 in the batch config at 0.93 utilization, same
 script for every column (`fp8_per_token_head` does not start on sm86: Triton's
-fp8 KV needs SM89+):
+fp8 KV needs SM89+). **Batch config again, so no speculation** — see the table
+above for what these caches cost a speculating single-user server:
 
-| | fp8 (FlashInfer) | int8_per_token_head (Triton) | int4_per_token_head (Triton) | KVarN k4v2 |
+| batch mode (no speculation) | fp8 (FlashInfer) | int8_per_token_head (Triton) | int4_per_token_head (Triton) | KVarN k4v2 |
 |---|---|---|---|---|
 | KV pool at 0.93 util | 164k tokens | 178k | **355k — 262k fits (1.35×)** | 302-420k |
 | perplexity (same battery) | 8.235 | 8.231 | 8.257 (+0.3%) | +0.16% |

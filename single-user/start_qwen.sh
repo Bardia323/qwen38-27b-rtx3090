@@ -25,7 +25,8 @@
 # CTX=long: fp8 KV via FlashInfer, 150k context, 3 drafts (k=4 crashes on
 #   FlashInfer as soon as one request finishes while another is mid-generation,
 #   vLLM 0.27.1); the split-KV attention patch is bf16-KV only, so ~90/98 tok/s.
-# CTX=huge: KVarN 4/2-bit KV cache (kvarn/), 200k context with MTP.
+# CTX=huge: KVarN 4/2-bit KV cache (kvarn/), 200k context with MTP, at roughly
+#   half the decode rate past 100k — see below and docs/long-context.md.
 #
 # Fast variant: MODEL defaults to models/Qwen3.8-27B-W4A16-AutoRound-fast when it
 # exists (int4-GPTQ lm_head + MTP, own-output draft vocab; drafter/README.md), else
@@ -53,7 +54,11 @@ API_SERVERS=${API_SERVERS:-1}
 # CTX=long (default): fp8 KV via FlashInfer, 150k context, 3 drafts.
 # CTX=fast: bf16 KV via FlashAttention, ~64k context, 4 drafts (~+7%).
 # CTX=huge: KVarN 4/2-bit KV cache (kvarn/ in this repo, run kvarn/install.sh
-#           once), 200k context with MTP, ~5% slower (see docs/long-context.md).
+#           once), 200k context with MTP. The decode tax is a function of context,
+#           not a constant: ~6% on short prompts, but 2.13x at 112k (32.0 vs fp8's
+#           68.1 tok/s), of which ~1.98x is step time and the rest is MTP acceptance
+#           falling from 2.56 to 2.38 tokens per step. Take it when the request
+#           would not otherwise fit, not for speed (see docs/long-context.md).
 CTX=${CTX:-fast}
 # SPEC=mtp (default): Qwen's own MTP head, k drafts chained (the numbers above).
 # SPEC=dflash2: the DFlash2 block drafter (incoai/Qwen3.8-27B-DFlash2, requantized
