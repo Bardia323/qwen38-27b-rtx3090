@@ -53,6 +53,11 @@ capture rather than the drafter -- eager is clean, and so is PIECEWISE, which
 keeps the compiled graphs and leaves only the multi-query verify uncaptured.
 single-user/start_qwen.sh therefore runs SPEC=dflash2 CTX=huge with
 cudagraph_mode=PIECEWISE; anyone driving vllm serve directly needs the same.
+It is a trade rather than a free win -- 3 runs each at 250 W: long context
+(labd copy@20k) 1.97 -> 7.83 tok/step and 38 -> 132 tok/s, but short-prompt
+decode drops 13-18% (de/en/code 78/125/202 -> 74/102/176 tok/s) with the full
+decode graphs gone. The capture mode is fixed at boot, so this mode takes the
+trade that matches long shared prefixes.
 
 Measured on an RTX 3090 (WSL2, 250 W power limit), fast variant, through
 single-user/start_qwen.sh itself, bench/labd_bench.py --ctx 20000:

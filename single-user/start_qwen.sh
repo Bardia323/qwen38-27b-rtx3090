@@ -216,14 +216,18 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   # that path -- acceptance collapses to ~1 token per step, and on some trees the
   # output degrades outright. It is the capture, not the drafter: eager is clean,
   # and so is PIECEWISE, which keeps the compiled graphs and leaves only the
-  # multi-query verify uncaptured. labd copy@20k through this script, prefix
-  # caching on:
-  #   FULL       1.97 tok/step,  39 tok/s
-  #   PIECEWISE  7.83 tok/step, 130 tok/s
-  # MTP is untouched here: its verify step is short and captures correctly, so
-  # forcing PIECEWISE would cost it decode speed for nothing. Set
-  # CUDAGRAPH_MODE=FULL_AND_PIECEWISE to get the captured verify back once that
-  # is fixed upstream.
+  # multi-query verify uncaptured. It is a trade, not a free win -- dropping the
+  # full decode graphs costs short-prompt throughput (3 runs each, 250 W):
+  #   long context, labd copy@20k   FULL 1.97 tok/step 38 tok/s
+  #                                 PIECEWISE 7.83 tok/step 132 tok/s   (3.5x)
+  #   short prompts, de/en/code     FULL 78/125/202 tok/s
+  #                                 PIECEWISE 74/102/176 tok/s          (-13..18%)
+  # The capture mode is fixed at boot, so CTX=huge takes the trade that matches
+  # what it is for: long shared prefixes. CUDAGRAPH_MODE=FULL_AND_PIECEWISE is
+  # there for a mostly-short-prompt workload, but treat it as unsafe until the
+  # capture bug is understood -- it only cost speed here, it corrupted output on
+  # a bare-metal tree. MTP is untouched either way: its verify step is short and
+  # captures correctly, so forcing PIECEWISE there would cost decode for nothing.
   [ "$SPEC" = "dflash2" ] && [ "$CTX" = "huge" ] &&
     CG_MODE=",\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\""
 fi

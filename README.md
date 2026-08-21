@@ -128,15 +128,22 @@ collapses to about one token per step, and on bare metal the output degrades
 outright. It is the capture rather than the drafter (eager is clean, and so is
 PIECEWISE, which keeps the compiled graphs and leaves only the multi-query
 verify uncaptured), so `CTX=huge` runs PIECEWISE and keeps prefix caching.
-Same box, same script, only the capture toggled:
 
-| `copy`, 25k prompt | tok per verify step | tok/s |
-|---|---|---|
-| `CUDAGRAPH_MODE=FULL_AND_PIECEWISE` | 1.97 | 39 |
-| PIECEWISE (the default here) | 7.83 | 130 |
+It is a trade rather than a free win: dropping the full decode graphs costs
+short-prompt throughput. Same box, same script, only the capture toggled,
+three runs each:
 
-`CUDAGRAPH_MODE=FULL_AND_PIECEWISE` puts the captured verify back once that is
-understood; the hunt is in the PR thread.
+| | `copy` @25k | de | en | code |
+|---|---|---|---|---|
+| `FULL_AND_PIECEWISE` | 38 tok/s (1.97/step) | 78 | 125 | 202 |
+| PIECEWISE (default here) | **132 tok/s (7.83/step)** | 74 | 102 | 176 |
+
+3.5x on the long shared prefix this mode exists for, 13-18% off short-prompt
+decode. The capture mode is fixed at boot, so `CTX=huge` takes the trade that
+matches what it is for. `CUDAGRAPH_MODE=FULL_AND_PIECEWISE` switches back, but
+treat that as unsafe until the capture bug is understood — here it only cost
+speed, on a bare-metal tree it corrupted the output. The hunt is in the PR
+thread.
 
 ## Benchmarks
 
