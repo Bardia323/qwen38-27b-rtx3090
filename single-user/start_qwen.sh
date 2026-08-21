@@ -64,8 +64,9 @@ CTX=${CTX:-fast}
 # SPEC=dflash2: the DFlash2 block drafter (incoai/Qwen3.8-27B-DFlash2, requantized
 #   to W4A16 by this repo: prepare/fetch_dflash2.py), 7 drafts in ONE non-autoregressive
 #   pass + a path selector; runs on vLLM's V2 model runner
-#   (patches/dflash2-backport.patch). CTX=fast only (bf16 KV / FLASH_ATTN; the
-#   drafter's block attention is non-causal); see README "DFlash2".
+#   (patches/dflash2-backport.patch). CTX=fast (bf16, 64k), CTX=long (int8,
+#   128k) or, with kvarn/install.sh, CTX=huge (KVarN 4/2-bit, 240k + prefix
+#   caching); see README "DFlash2".
 SPEC=${SPEC:-mtp}
 # SPEC_ATTN=1: split-KV Triton attention for the multi-query verify step
 # (patches/spec-decode-attn.patch); bf16 KV only, so CTX=fast only.
@@ -96,8 +97,14 @@ if [ "$SPEC" = "dflash2" ] && [ "$CTX" = "long" ]; then
   # mode for a RAG or coding front-end that loads a document once, not for general chat.
   ATTN_ARGS="--attention-backend TRITON_ATTN --kv-cache-dtype int8_per_token_head"
   export VLLM_SPEC_DECODE_ATTN=${SPEC_ATTN:-1}
+elif [ "$SPEC" = "dflash2" ] && [ "$CTX" = "huge" ]; then
+  # KVarN 4/2-bit KV on the V2 runner (kvarn/, with kvarn-v2-runner.patch as its
+  # second stage): the pinned pool holds 268k tokens at 245760 max-model-len.
+  # The split-KV verify attention is bf16-KV only -- the KVarN backend brings
+  # its own dequant path, so the env stays off here.
+  export VLLM_SPEC_DECODE_ATTN=0
 elif [ "$SPEC" = "dflash2" ] && [ "$CTX" != "fast" ]; then
-  echo "SPEC=dflash2 supports CTX=fast (bf16/FLASH_ATTN, 64k) and CTX=long (int8/TRITON_ATTN, 128k); CTX=$CTX keeps SPEC=mtp" >&2
+  echo "SPEC=dflash2 supports CTX=fast (bf16, 64k), CTX=long (int8, 128k) and CTX=huge (KVarN, 240k; kvarn/install.sh); CTX=$CTX keeps SPEC=mtp" >&2
   SPEC=mtp
 fi
 if [ "$SPEC" = "dflash2" ]; then
@@ -148,7 +155,15 @@ if [ "$SPEC" = "dflash2" ]; then
   # state page per speculative block. That second term is what scales -- NOT the slot
   # count: 1 slot and 8 slots differ by about 8 MiB in total, so cutting MAX_SEQS buys no
   # context. Single-user mode keeps 4 slots when the block is long for the graphs.
-  if [ "$CTX" = "long" ]; then
+  if [ "$CTX" = "huge" ]; then
+    # KVarN pool: ~20 KB/token effective. 5.26 GiB pinned -> 268,169 tokens of
+    # KV at 245760 max-model-len with 2 slots (single-user long-context; the
+    # graphs stay at the k=7 size).
+    MAX_SEQS=${MAX_SEQS:-2}
+    MAX_LEN=${DFLASH_MAX_LEN:-245760}
+    KV_MEM=${KV_MEM-5261334938}
+    export VLLM_V2_CUDAGRAPH_MEM_MIB=${VLLM_V2_CUDAGRAPH_MEM_MIB:-1400}
+  elif [ "$CTX" = "long" ]; then
     # int8 KV: measured 136,429 tokens of pool at DFLASH_TOKENS=7 with prefix caching on
     # (138,696 without), against bf16's 69,758 in the same pinned 5.2 GiB. DFLASH_TOKENS>7
     # at this context is untested -- the graphs and the state pages both grow.
@@ -194,6 +209,9 @@ fi
 # per request (~16% of the KV pool). Hybrid models keep this opt-in upstream.
 if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   EXTRA_ARGS="--enable-prefix-caching --mamba-cache-mode align ${EXTRA_ARGS}"
+  # KVarN runs --block-size 128; match the prefix hash unit to its tile so cache
+  # hits land on tile boundaries (a non-multiple of 128 corrupts the pool).
+  [ "$CTX" = "huge" ] && EXTRA_ARGS="--prefix-match-unit 128 ${EXTRA_ARGS}"
 fi
 
 # ASYNC_SCHED=0 (set above for a long DFlash2 verify block) runs the scheduler
