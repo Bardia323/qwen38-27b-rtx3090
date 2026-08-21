@@ -47,7 +47,13 @@ for ctx in [int(a) for a in sys.argv[1:]]:
     doc = DOC[: int(ctx * 3.6)]
     content = ("Dokument:\n\n" + doc +
                "\n\nGengiv ordret de første 60 linjer af dokumentet. Ingen kommentarer, kun teksten.")
-    ptok = len(TOK.encode(content))
+    # The ENGINE sees the chat-templated prompt, not this string: the Qwen3 wrapper
+    # with enable_thinking=false is +12 tokens. Measuring the raw content was how the
+    # residue got misread as "R = 117 + k" and then as a mysterious constant 12 -- the
+    # real rule is just (templated length) == L (mod 128). Never report the raw count.
+    ptok = len(TOK.encode(TOK.apply_chat_template(
+        [{"role": "user", "content": content}], tokenize=False,
+        add_generation_prompt=True, enable_thinking=False), add_special_tokens=False))
     body = json.dumps({"model": "qwen3.8-27b",
                        "messages": [{"role": "user", "content": content}],
                        "max_tokens": 400, "temperature": 0,
@@ -70,6 +76,9 @@ for ctx in [int(a) for a in sys.argv[1:]]:
     # block, so a healthy k=3 run sits at 3.96 and an absolute threshold calls it
     # broken. A working verbatim task reproduces the whole answer; a broken one
     # returns a few characters, a degenerate repeat, or nothing at all.
-    flag = "ok" if len(ans) > 40 and n >= len(ans) - 2 else "BROKEN"
+    # n is a LONGEST-PREFIX match, so one wrong character at offset 38 pins it at 38
+    # however perfect the next 750 are. Judge with `repeats` alongside: a real collapse
+    # repeats a block many times, a single divergent token does not.
+    flag = "ok" if len(ans) > 40 and n >= len(ans) - 2 else ("BROKEN" if rep > 3 else "DIVERGED")
     print(f"{ctx:>7} {ptok:>11} {ptok % 128:>7} {tps:>9.2f} "
           f"{str(n) + '/' + str(len(ans)):>12} {rep:>8}  {flag}")

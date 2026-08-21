@@ -322,6 +322,17 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     `dflash2` on the theory that MTP's short verify step captures correctly; it
     does not, and `SPEC=mtp CTX=huge` shipped with the bug.
 
+    A third trap, learned the hard way on `DFLASH_TOKENS=15`: `bench/bugb_sweep.py`
+    used to report the RAW prompt length, not the chat-templated one the engine
+    actually sees (+12 tokens for the Qwen3 wrapper). That offset is why the rule
+    first read as `R = 117 + k` and then as a mysterious constant 12; both were the
+    same relation seen through a harness bug. It also made a k=15 sweep look
+    structureless until the offset was applied, at which point the lowest-acceptance
+    row sat exactly on `== L`. The script now templates before counting. And read
+    `repeats` next to `verbatim`: the verbatim column is a longest-prefix match, so a
+    single wrong character at offset 38 reports `38/791` no matter how good the rest
+    is -- only `repeats` tells you whether it actually collapsed.
+
     Two traps for anyone measuring this. Sweep prompt length in steps of **1
     token** — at a coarse grid one broken sample below and one above reads as a
     cliff, which is how it was first diagnosed. And send each length to a **fresh
