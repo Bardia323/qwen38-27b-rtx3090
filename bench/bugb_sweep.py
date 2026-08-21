@@ -66,6 +66,10 @@ for ctx in [int(a) for a in sys.argv[1:]]:
     while n < len(ans) and ans[:n + 1] in doc:
         n += 1
     rep = max((ans.count(ans[i:i + 40]) for i in range(0, max(1, len(ans) - 40), 40)), default=0)
-    flag = "BROKEN" if tps < 4 else "ok"
+    # Judge on the OUTPUT, not on an absolute tok/step: the ceiling is the verify
+    # block, so a healthy k=3 run sits at 3.96 and an absolute threshold calls it
+    # broken. A working verbatim task reproduces the whole answer; a broken one
+    # returns a few characters, a degenerate repeat, or nothing at all.
+    flag = "ok" if len(ans) > 40 and n >= len(ans) - 2 else "BROKEN"
     print(f"{ctx:>7} {ptok:>11} {ptok % 128:>7} {tps:>9.2f} "
           f"{str(n) + '/' + str(len(ans)):>12} {rep:>8}  {flag}")

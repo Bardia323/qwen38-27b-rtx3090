@@ -157,15 +157,16 @@ the root cause. Treat that as unsafe rather than merely slower — the corruptio
 above is what it does on bare metal.
 
 Two limits worth knowing before you point this at anything.
-**It is a single-user mode, not a shared one** — but not for the reason we first
-wrote here. Fire 8 concurrent requests at it and the server runs **two**, with the
-other six queued, for the whole run, at `max_num_seqs=8` and under either capture
-mode. That is the pool arithmetic the boot log prints: `Maximum concurrency for
-245,760 tokens per request: 1.09x`, because `CTX=huge` asks for a 245,760-token
-`--max-model-len` against a 268,169-token pool. If you want this mode to batch,
-set `MAX_LEN` to the context you actually need rather than the maximum. One person
-with a large document is what the default is for; a crowd is what `batch/` is for.
-And `DFLASH_TOKENS=15` does not boot at this context on 24 GB — the pinned-buffer
+**It is a single-user mode by configuration, and the knob is `MAX_SEQS`.** Fire 8
+concurrent requests at `CTX=huge` and the server runs **two**, with the other six
+queued — because this mode sets `MAX_SEQS=2`. That is a deliberate default for
+long-document sessions, not an engine limit and not a property of the block
+verify, so `MAX_SEQS=8` lifts it: peak 5 concurrent on the same 8-stream test,
+with the KV pool **unchanged at 268,169 tokens** (a recurrent-state slot costs
+~8 MiB, so the slots are close to free; what scales with the pool is the verify
+block length, not the slot count). Raising it grows the captured decode graphs,
+which is why the default stays low rather than because it would cost you context.
+And `DFLASH_TOKENS=15` does not boot at 240k on 24 GB — the pinned-buffer
 arithmetic in [docs/long-context.md](docs/long-context.md) says why — so
 reproduction mode and 240k are mutually exclusive; the default 7 is what runs.
 
@@ -188,10 +189,16 @@ and consistent with the uncaptured verify being launch-bound: launches that are
 nearly free here are not free there.
 
 The capture mode is fixed at boot, so `CTX=huge` takes the trade that matches what
-it is for. `CUDAGRAPH_MODE=FULL_AND_PIECEWISE` switches back — treat it as unsafe.
-The corruption it causes is now pinned to one prompt length in every 128
-(gotcha 37 in [docs/gotchas.md](docs/gotchas.md), `bench/bugb_sweep.py`); the hunt
-for the boundary case itself is in the PR thread.
+it is for — **for every speculator, `mtp` included**. `CUDAGRAPH_MODE=FULL_AND_PIECEWISE`
+switches back; treat it as unsafe. What it does is corrupt one prompt length in
+every 128, and only for a request that hits the prefix cache: `dflash2` collapses
+to degenerate repetition, `mtp` stops dead and returns an empty answer. The broken
+residue tracks the verify block length, which is why we had wrongly scoped this
+workaround to `dflash2` — `SPEC=mtp CTX=huge` shipped with the same bug, and
+piecewise capture costs it nothing measurable (87.8/86.1/70.4/63.5 tok/s captured
+against 93.5/83.8/70.3/59.6 piecewise over 8k-50k). Gotcha 37 in
+[docs/gotchas.md](docs/gotchas.md) has the residue table and `bench/bugb_sweep.py`
+reproduces it; the hunt for the boundary case is in the PR thread.
 
 ## Benchmarks
 

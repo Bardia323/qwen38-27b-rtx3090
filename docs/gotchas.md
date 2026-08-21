@@ -271,29 +271,45 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     `verify.sh` now encodes `<think>` against every dir we pass to `--model` instead of
     only checking that the dir exists, and `docker/prepare.sh` counts `tokenizer.json`
     as part of a complete download.
-37. **Bug B is one prompt length in every 128, not a length threshold — and the
-    sampling grid hid that for weeks.** With `SPEC=dflash2 CTX=huge PREFIX_CACHE=1`
-    and `CUDAGRAPH_MODE=FULL_AND_PIECEWISE`, a prompt whose token count is
-    `≡ 124 (mod 128)` collapses to 1.97 tok/step and degenerate repetition
-    (`4/3595` characters verbatim, one 40-char block repeated 79 times). Every
-    other residue is clean, including 123 and 125 either side, and the failure is
-    deterministic — repeat runs are bit-identical. Measured at 24,956 / 25,084 /
-    25,212 / 25,340 tokens, all `≡124`, against sixteen clean residues.
+37. **Bug B needs a prefix-cache HIT, and then fires at one prompt length in every
+    128 — the residue tracks the verify block, and it is not dflash2-only.**
+    Under `CTX=huge` with a CAPTURED (FULL) verify step, a request that hits the
+    prefix cache and whose prompt length lands on one particular residue mod 128
+    collapses: `SPEC=dflash2 DFLASH_TOKENS=7` gives 1.97 tok/step and degenerate
+    repetition (`4/3595` characters verbatim, one 40-char block ×79), `SPEC=mtp`
+    stops dead and returns `""` or `"#"` with `finish_reason=stop`. Every other
+    residue is 794/794 verbatim. Deterministic — repeats are bit-identical.
 
-    It is the token count and nothing else: hold the document byte-identical and
-    pad the *instruction* by one token and a broken length becomes clean. The
-    default `PIECEWISE` has no such length, which is why the shipped config is
-    unaffected.
+    Two conditions, and it took two people to see both. The **hit** is necessary:
+    a fresh server, one request, no warm-up, never collapses at any length
+    ([#13](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/13), mjungnickel18) —
+    which is also why `PREFIX_CACHE=0` always looked clean. The **residue** decides
+    whether a hit corrupts, and it moves with the verify block length:
 
-    Two things follow. First, sweep this in steps of **1 token**, not 100 — on a
-    coarse grid one broken sample below and one above reads as a cliff, which is
-    how it was first diagnosed both here and in
-    [#13](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/13). Second, the
-    residue moves with the alignment config: the reporter's tree, which predates
-    `--prefix-match-unit 128`, breaks at `≡8` instead — both of his broken lengths
-    are `≡8` while all seven of his healthy ones are seven different residues.
-    `bench/bugb_sweep.py` prints the `mod 128` column for exactly this.
+    | verify block | broken residue | free slots in the last block |
+    |---|---|---|
+    | 8 (`dflash2`, `DFLASH_TOKENS=7`) | 124 | 4 |
+    | 4 (`dflash2`, `DFLASH_TOKENS=3`) | 120 | 8 |
+    | 4 (`mtp`, `DRAFT_TOKENS=3`) | 120 | 8 |
 
-    The trap worth naming: `labd_bench --ctx 20000`, the setting every measurement
-    in this repo and that PR used, lands on the broken residue. One token either
-    way and nobody would have seen this bug at all.
+    Confirmed periodic: broken at 24,956 / 25,084 / 25,212 / 25,340 for a block of
+    8, and 25,080 / 25,208 / 25,336 for a block of 4. Hold the document
+    byte-identical and pad the *instruction* by one token and a broken length goes
+    clean, so it is the token count rather than the corpus. That the residue tracks
+    the block puts the boundary case in the multi-query verify against a
+    partially-hit prefix, not in a fixed buffer.
+
+    Mitigation: `CTX=huge` forces `cudagraph_mode=PIECEWISE` for **every**
+    speculator, which is clean at every residue. It costs nothing measurable —
+    `SPEC=mtp` over 8k/16k/32k/50k is 87.8/86.1/70.4/63.5 tok/s captured against
+    93.5/83.8/70.3/59.6 piecewise. This repo previously scoped that workaround to
+    `dflash2` on the theory that MTP's short verify step captures correctly; it
+    does not, and `SPEC=mtp CTX=huge` shipped with the bug.
+
+    Two traps for anyone measuring this. Sweep prompt length in steps of **1
+    token** — at a coarse grid one broken sample below and one above reads as a
+    cliff, which is how it was first diagnosed. And send each length to a **fresh
+    server**, or request N inherits request N-1's blocks and you measure history
+    instead of length; `bench/labd_bench.py` sends two warm-ups on `doc[:4000]`,
+    which arms the trigger for everything after it. `bench/bugb_sweep.py` prints
+    the `mod 128` column for this.

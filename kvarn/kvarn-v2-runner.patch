@@ -13,13 +13,17 @@ V2 runner; every blocker was allocator/geometry logic:
  4. kv_cache_utils.py: sliding-window groups (the drafter) stay out of the scheduler
     LCM / hash GCD; an explicit --prefix-match-unit now beats the mamba-divergence
     fallback (which silently ignored it).
- 5. kv_cache_coordinator.py / single_type_kv_cache_manager.py: the hash-unit assert
-    accepts SW blocks smaller than the hash unit; the SW manager returns a clean miss
-    on the read side and skips caching on the write side, instead of asserting
-    (prefix reuse is meaningless for a rolling window anyway). Without the write-side
-    half, cache_full_blocks -> resolve_block_hashes asserts as soon as the drafter's
-    SW group is in the picture, which is what made --prefix-match-unit 128 look like a
-    multi-GPU workaround; it is neither optional nor TP-specific.
+ 5. kv_cache_coordinator.py / single_type_kv_cache_manager.py: the SW manager returns a
+    clean miss on the read side and skips caching on the write side, instead of
+    asserting (prefix reuse is meaningless for a rolling window anyway). Without the
+    write-side half, cache_full_blocks -> resolve_block_hashes asserts as soon as the
+    drafter's SW group is in the picture, which is what made --prefix-match-unit 128
+    look like a multi-GPU workaround; it is neither optional nor TP-specific.
+    The read-side guard covers BOTH directions of misalignment. The SW block is
+    usually smaller than the hash unit (16 against 2176), but the page arithmetic
+    promotes it larger at some draft lengths -- 2048 against a 128 unit at
+    DFLASH_TOKENS=3 -- which slipped past a smaller-only check and then tripped the
+    upstream assert on the first request, killing the engine (issue #18).
  6. mamba_hybrid.py: add_request seeded the running mamba state column with
     cache_config.block_size instead of the mamba group's block size. With
     --block-size 128 (KVarN tile) a resume from a 100k cached prefix indexed column
@@ -188,14 +192,20 @@ Written against vLLM 0.27.1 + this repo's patch set.
              f"hash_block_size. block_sizes={group_block_sizes}, "
 --- a/v1/core/single_type_kv_cache_manager.py
 +++ b/v1/core/single_type_kv_cache_manager.py
-@@ -915,6 +915,11 @@
-         assert alignment_tokens % kv_cache_spec.block_size == 0, (
-             "SlidingWindowManager does not support fine-grained (partial) cache hits"
-         )
-+        # port(kvarn-v2): the drafter's SW block can be smaller than the hash
-+        # unit (2176). Prefix reuse is meaningless for a rolling window anyway
-+        # — so report a clean miss instead of asserting.
-+        if kv_cache_spec.block_size % block_pool.hash_block_size != 0:
+@@ -915,6 +915,14 @@
+-        assert alignment_tokens % kv_cache_spec.block_size == 0, (
+-            "SlidingWindowManager does not support fine-grained (partial) cache hits"
+-        )
++        # port(kvarn-v2): the drafter's SW block need not line up with the hash unit
++        # in either direction. It is usually smaller (16 against a 2176 unit), but at
++        # some draft lengths the page arithmetic promotes it larger instead -- 2048
++        # against a 128 unit at DFLASH_TOKENS=3, which clears the divisibility check
++        # below and then trips the upstream assert on the first request, killing the
++        # engine (issue #18). Neither case can serve a fine-grained hit, and prefix
++        # reuse is meaningless for a rolling window anyway, so report a clean miss
++        # for both instead of asserting.
++        if (kv_cache_spec.block_size % block_pool.hash_block_size != 0
++                or alignment_tokens % kv_cache_spec.block_size != 0):
 +            return tuple([] for _ in kv_cache_group_ids), 0
          block_hashes = resolve_block_hashes(
              block_hashes,

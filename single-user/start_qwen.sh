@@ -227,12 +227,24 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   # verify is launch-bound, and launches are not free there.
   # The capture mode is fixed at boot, so CTX=huge takes the trade. Treat
   # CUDAGRAPH_MODE=FULL_AND_PIECEWISE as unsafe: what it does is corrupt one
-  # prompt length in every 128 (==124 mod 128 here -- gotcha 37,
-  # bench/bugb_sweep.py), which a coarse sweep reads as a length threshold and a
-  # lucky sweep misses entirely. MTP is untouched either way: its verify step is
-  # short and captures correctly, so forcing PIECEWISE there would cost decode
-  # for nothing.
-  [ "$SPEC" = "dflash2" ] && [ "$CTX" = "huge" ] &&
+  # prompt length in every 128 (gotcha 37, bench/bugb_sweep.py), which a coarse
+  # sweep reads as a length threshold and a lucky sweep misses entirely.
+  # This is NOT dflash2-only, which is what we used to claim here. SPEC=mtp with
+  # CTX=huge captured FULL by default and has the same bug: at the residue that
+  # matches its 4-token verify block it stops immediately, returning "" or "#"
+  # with finish_reason=stop while every other residue is 794/794 verbatim. The
+  # broken residue tracks the verify block length (124 for a block of 8, 120 for
+  # a block of 4 -- the same 120 under mtp and under dflash2 DFLASH_TOKENS=3), so
+  # the boundary case is in the multi-query verify and every KVarN speculator
+  # reaches it. It also needs a prefix-cache HIT to fire at all, which is why
+  # PREFIX_CACHE=0 always looked clean (PR #13).
+  # Correctness first, and it is close to free for MTP as well -- same depth
+  # ladder, only the capture toggled, 8k/16k/32k/50k:
+  #   FULL      87.8 / 86.1 / 70.4 / 63.5 tok/s
+  #   PIECEWISE 93.5 / 83.8 / 70.3 / 59.6 tok/s
+  # so PIECEWISE now covers the whole of CTX=huge, not just dflash2. The old
+  # claim here that forcing it "would cost decode for nothing" was wrong twice.
+  [ "$CTX" = "huge" ] &&
     CG_MODE=",\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\""
 fi
 
