@@ -376,8 +376,8 @@ with thinking enabled (the default).
 
 Tool calling works over the same endpoint — send `tools` with `tool_choice:
 "auto"` and the reply carries `tool_calls`. Both launchers set
-`--enable-auto-tool-choice --tool-call-parser qwen3_xml`; the parser has to be
-`qwen3_xml` because this model's chat template emits Qwen's XML call format and
+`--enable-auto-tool-choice --tool-call-parser qwen3_coder`; the parser has to
+read Qwen's XML call format, which is what this model's chat template emits —
 not the JSON that `hermes` reads. `TOOLS=0` turns it off.
 
 To check the numbers on your own card: `bash verify.sh` (also probes the live
