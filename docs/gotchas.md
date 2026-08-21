@@ -271,3 +271,29 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     `verify.sh` now encodes `<think>` against every dir we pass to `--model` instead of
     only checking that the dir exists, and `docker/prepare.sh` counts `tokenizer.json`
     as part of a complete download.
+37. **Bug B is one prompt length in every 128, not a length threshold — and the
+    sampling grid hid that for weeks.** With `SPEC=dflash2 CTX=huge PREFIX_CACHE=1`
+    and `CUDAGRAPH_MODE=FULL_AND_PIECEWISE`, a prompt whose token count is
+    `≡ 124 (mod 128)` collapses to 1.97 tok/step and degenerate repetition
+    (`4/3595` characters verbatim, one 40-char block repeated 79 times). Every
+    other residue is clean, including 123 and 125 either side, and the failure is
+    deterministic — repeat runs are bit-identical. Measured at 24,956 / 25,084 /
+    25,212 / 25,340 tokens, all `≡124`, against sixteen clean residues.
+
+    It is the token count and nothing else: hold the document byte-identical and
+    pad the *instruction* by one token and a broken length becomes clean. The
+    default `PIECEWISE` has no such length, which is why the shipped config is
+    unaffected.
+
+    Two things follow. First, sweep this in steps of **1 token**, not 100 — on a
+    coarse grid one broken sample below and one above reads as a cliff, which is
+    how it was first diagnosed both here and in
+    [#13](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/13). Second, the
+    residue moves with the alignment config: the reporter's tree, which predates
+    `--prefix-match-unit 128`, breaks at `≡8` instead — both of his broken lengths
+    are `≡8` while all seven of his healthy ones are seven different residues.
+    `bench/bugb_sweep.py` prints the `mod 128` column for exactly this.
+
+    The trap worth naming: `labd_bench --ctx 20000`, the setting every measurement
+    in this repo and that PR used, lands on the broken residue. One token either
+    way and nobody would have seen this bug at all.

@@ -156,15 +156,18 @@ having: turn 2 over a cached 100k document costs 4.7 s against 169 s cold.
 the root cause. Treat that as unsafe rather than merely slower — the corruption
 above is what it does on bare metal.
 
-Two limits worth knowing before you point this at anything, both from an
-independent RTX 3090 Ti reproduction ([#13](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/13)):
-**it is a single-user mode, not a shared one.** At 8 concurrent streams the block
-verify batches badly — 16-73 tok/s per stream, ~131 aggregate, against ~447 for
-`SPEC=mtp` on bf16 KV on the same card. One person with a large document is what
-this is for; a crowd is what `batch/` is for. And `DFLASH_TOKENS=15` does not
-boot at this context on 24 GB — the pinned-buffer arithmetic in
-[docs/long-context.md](docs/long-context.md) says why — so reproduction mode and
-240k are mutually exclusive here; the default 7 is what this mode runs.
+Two limits worth knowing before you point this at anything.
+**It is a single-user mode, not a shared one** — but not for the reason we first
+wrote here. Fire 8 concurrent requests at it and the server runs **two**, with the
+other six queued, for the whole run, at `max_num_seqs=8` and under either capture
+mode. That is the pool arithmetic the boot log prints: `Maximum concurrency for
+245,760 tokens per request: 1.09x`, because `CTX=huge` asks for a 245,760-token
+`--max-model-len` against a 268,169-token pool. If you want this mode to batch,
+set `MAX_LEN` to the context you actually need rather than the maximum. One person
+with a large document is what the default is for; a crowd is what `batch/` is for.
+And `DFLASH_TOKENS=15` does not boot at this context on 24 GB — the pinned-buffer
+arithmetic in [docs/long-context.md](docs/long-context.md) says why — so
+reproduction mode and 240k are mutually exclusive; the default 7 is what runs.
 
 It is a trade rather than a free win: dropping the full decode graphs costs
 short-prompt throughput. Same box, same script, only the capture toggled,
@@ -176,11 +179,19 @@ three runs each:
 | PIECEWISE (default here) | **132 tok/s (7.83/step)** | 74 | 102 | 176 |
 
 3.5x on the long shared prefix this mode exists for, 13-18% off short-prompt
-decode. The capture mode is fixed at boot, so `CTX=huge` takes the trade that
-matches what it is for. `CUDAGRAPH_MODE=FULL_AND_PIECEWISE` switches back, but
-treat that as unsafe until the capture bug is understood — here it only cost
-speed, on a bare-metal tree it corrupted the output. The hunt is in the PR
-thread.
+decode. **That 13-18% is short prompts only, and it does not generalise** — past
+8k the two capture modes are within noise of each other on bare metal (111.8 vs
+109.3 tok/s at 8k, 78.2 vs 86.1 at 16k, 68.9 vs 73.3 at 32k, 58.4 vs 56.0 at 50k,
+unique prompts, one server per mode). Under GPU passthrough on a VM the same
+comparison costs 2-3x, reported in [#13](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/13)
+and consistent with the uncaptured verify being launch-bound: launches that are
+nearly free here are not free there.
+
+The capture mode is fixed at boot, so `CTX=huge` takes the trade that matches what
+it is for. `CUDAGRAPH_MODE=FULL_AND_PIECEWISE` switches back — treat it as unsafe.
+The corruption it causes is now pinned to one prompt length in every 128
+(gotcha 37 in [docs/gotchas.md](docs/gotchas.md), `bench/bugb_sweep.py`); the hunt
+for the boundary case itself is in the PR thread.
 
 ## Benchmarks
 
