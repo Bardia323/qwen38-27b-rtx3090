@@ -88,6 +88,38 @@ approximating it, and GSM8K reads 96.0-96.5% across the three columns. What
 the whole reason it is opt-in, and why the default stays where it is for anyone
 serving more than a few people. Every other knob: [single-user/](single-user/).
 
+### DFlash2 at 240k: `CTX=huge` (KVarN) also combines with `SPEC=dflash2`
+
+```bash
+bash kvarn/install.sh                # applies kvarn-v2-runner.patch as its second stage
+SPEC=dflash2 CTX=huge PREFIX_CACHE=1 bash single-user/start_qwen.sh
+```
+
+Where `CTX=long` doubles the DFlash2 pool with int8 KV (138k), the KVarN cache
+takes the same idea further: 268k tokens of pool at 245760 max-model-len, on the
+same pinned budget. No kernel work — the KVarN Triton kernels run unmodified on
+the V2 runner; the seven fixes in `kvarn/kvarn-v2-runner.patch` are allocator and
+geometry logic (the patch header walks through them, including an upstream vLLM
+bug in the mamba align resume path, and a NaN path in the DFlash2 candidate
+selector that KVarN noise exposes on verbatim-reproduction content). RTX 3090
+under WSL2 at a 200 W power limit (all numbers in this section are WSL2 —
+bare-metal validation pending), `bench/labd_bench.py --ctx 20000`:
+
+| `SPEC=dflash2 CTX=huge PREFIX_CACHE=1` | tok/s |
+|---|---|
+| copy / edit (reproduction, 6.4 tok per verify step) | 114 / 109 |
+| code / quote / summary / qa | 85 / 44 / 38 / 34 |
+| GSM8K exact-match (200 q, greedy, thinking off) | 95.5% |
+| KV capacity at 240k max-model-len | 268k tokens |
+| 200k-deep needle | correct |
+| turn 2 over a 200k cached prefix | 4.4 s (vs ~7.5 min cold) |
+
+One caveat to the "all of it is lossless" paragraph above: the speculation here
+is still exact, but this mode inherits KVarN's 4/2-bit KV cache, which is lossy —
+the same trade `CTX=huge` already makes (deep-needle retrieval passes at 200k).
+On WSL2, set `VLLM_WSL_PIN_MEMORY=1` — the V2 runner's UVA buffers work fine on
+the paravirt driver; vLLM's blanket pin-memory ban predates it.
+
 ## Benchmarks
 
 Full tables per mode in [batch/README.md](batch/README.md) and
