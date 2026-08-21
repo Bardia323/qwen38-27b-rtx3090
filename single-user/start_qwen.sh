@@ -212,6 +212,20 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   # KVarN runs --block-size 128; match the prefix hash unit to its tile so cache
   # hits land on tile boundaries (a non-multiple of 128 corrupts the pool).
   [ "$CTX" = "huge" ] && EXTRA_ARGS="--prefix-match-unit 128 ${EXTRA_ARGS}"
+  # DFlash2 only: prefix caching and a CAPTURED (FULL) verify step do not mix on
+  # that path -- acceptance collapses to ~1 token per step, and on some trees the
+  # output degrades outright. It is the capture, not the drafter: eager is clean,
+  # and so is PIECEWISE, which keeps the compiled graphs and leaves only the
+  # multi-query verify uncaptured. labd copy@20k through this script, prefix
+  # caching on:
+  #   FULL       1.97 tok/step,  39 tok/s
+  #   PIECEWISE  7.83 tok/step, 130 tok/s
+  # MTP is untouched here: its verify step is short and captures correctly, so
+  # forcing PIECEWISE would cost it decode speed for nothing. Set
+  # CUDAGRAPH_MODE=FULL_AND_PIECEWISE to get the captured verify back once that
+  # is fixed upstream.
+  [ "$SPEC" = "dflash2" ] && [ "$CTX" = "huge" ] &&
+    CG_MODE=",\"cudagraph_mode\":\"${CUDAGRAPH_MODE:-PIECEWISE}\""
 fi
 
 # ASYNC_SCHED=0 (set above for a long DFlash2 verify block) runs the scheduler
@@ -244,6 +258,6 @@ exec venv/bin/vllm serve "$MODEL" \
   ${ASYNC_ARGS} \
   --max-num-batched-tokens 2048 \
   --speculative-config "$SPEC_CFG" \
-  --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \
+  --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]${CG_MODE}}" \
   --reasoning-parser qwen3 \
   ${EXTRA_ARGS}
