@@ -193,8 +193,9 @@ it is for — **for every speculator, `mtp` included**. `CUDAGRAPH_MODE=FULL_AND
 switches back; treat it as unsafe. What it does is corrupt one prompt length in
 every 128, and only for a request that hits the prefix cache: `dflash2` collapses
 to degenerate repetition, `mtp` stops dead and returns an empty answer. The broken
-residue tracks the verify block length, which is why we had wrongly scoped this
-workaround to `dflash2` — `SPEC=mtp CTX=huge` shipped with the same bug, and
+residue differs by configuration (and what drives it is still open), which is why
+we had wrongly scoped this workaround to `dflash2` — `SPEC=mtp CTX=huge` shipped
+with the same bug, and
 piecewise capture costs it nothing measurable (87.8/86.1/70.4/63.5 tok/s captured
 against 93.5/83.8/70.3/59.6 piecewise over 8k-50k). Gotcha 37 in
 [docs/gotchas.md](docs/gotchas.md) has the residue table and `bench/bugb_sweep.py`

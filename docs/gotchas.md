@@ -272,7 +272,7 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     only checking that the dir exists, and `docker/prepare.sh` counts `tokenizer.json`
     as part of a complete download.
 37. **Bug B needs a prefix-cache HIT, and then fires at one prompt length in every
-    128 — the residue tracks the verify block, and it is not dflash2-only.**
+    128. It is not dflash2-only.**
     Under `CTX=huge` with a CAPTURED (FULL) verify step, a request that hits the
     prefix cache and whose prompt length lands on one particular residue mod 128
     collapses: `SPEC=dflash2 DFLASH_TOKENS=7` gives 1.97 tok/step and degenerate
@@ -284,20 +284,29 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     a fresh server, one request, no warm-up, never collapses at any length
     ([#13](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/13), mjungnickel18) —
     which is also why `PREFIX_CACHE=0` always looked clean. The **residue** decides
-    whether a hit corrupts, and it moves with the verify block length:
+    whether a hit corrupts, and it differs between configurations — but what
+    drives it is **not known**, because two quantities co-vary perfectly across
+    every configuration measured so far:
 
-    | verify block | broken residue | free slots in the last block |
-    |---|---|---|
-    | 8 (`dflash2`, `DFLASH_TOKENS=7`) | 124 | 4 |
-    | 4 (`dflash2`, `DFLASH_TOKENS=3`) | 120 | 8 |
-    | 4 (`mtp`, `DRAFT_TOKENS=3`) | 120 | 8 |
+    | config | verify block | attention block | broken residue |
+    |---|---|---|---|
+    | `dflash2`, `DFLASH_TOKENS=7` | 8 | 2176 (=17x128) | 124 |
+    | `dflash2`, `DFLASH_TOKENS=3` | 4 | 2048 (=16x128) | 120 |
+    | `mtp`, `DRAFT_TOKENS=3` | 4 | 2048 | 120 |
+
+    vLLM picks the attention block at boot to cover the mamba page ("Setting
+    attention block size to N tokens") and it moves with the draft count, so
+    "the residue tracks the verify block" and "the residue tracks the attention
+    block" fit these numbers equally well. The first was claimed here and is
+    retracted; separating them needs a config where the two differ.
 
     Confirmed periodic: broken at 24,956 / 25,084 / 25,212 / 25,340 for a block of
     8, and 25,080 / 25,208 / 25,336 for a block of 4. Hold the document
     byte-identical and pad the *instruction* by one token and a broken length goes
-    clean, so it is the token count rather than the corpus. That the residue tracks
-    the block puts the boundary case in the multi-query verify against a
-    partially-hit prefix, not in a fixed buffer.
+    clean, so it is the token count rather than the corpus. What is established: `mtp` and
+    `dflash2` at the same draft count break at the same residue, so the drafter is
+    not implicated and the shared multi-query verify against a partially-hit
+    prefix is.
 
     Mitigation: `CTX=huge` forces `cudagraph_mode=PIECEWISE` for **every**
     speculator, which is clean at every residue. It costs nothing measurable —

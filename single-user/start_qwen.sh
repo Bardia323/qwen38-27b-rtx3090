@@ -233,11 +233,13 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   # CTX=huge captured FULL by default and has the same bug: at the residue that
   # matches its 4-token verify block it stops immediately, returning "" or "#"
   # with finish_reason=stop while every other residue is 794/794 verbatim. The
-  # broken residue tracks the verify block length (124 for a block of 8, 120 for
-  # a block of 4 -- the same 120 under mtp and under dflash2 DFLASH_TOKENS=3), so
-  # the boundary case is in the multi-query verify and every KVarN speculator
-  # reaches it. It also needs a prefix-cache HIT to fire at all, which is why
-  # PREFIX_CACHE=0 always looked clean (PR #13).
+  # broken residue differs by config (124 at DFLASH_TOKENS=7, 120 at 3, and the
+  # same 120 under mtp k=3). What drives it is NOT known: the verify block length
+  # and the boot-chosen attention block size (2176 vs 2048) co-vary in every
+  # config measured, so either fits. What is established is that mtp and dflash2
+  # at the same draft count break identically, so the drafter is not implicated
+  # and every KVarN speculator reaches it. It also needs a prefix-cache HIT to
+  # fire at all, which is why PREFIX_CACHE=0 always looked clean (PR #13).
   # Correctness first, and it is close to free for MTP as well -- same depth
   # ladder, only the capture toggled, 8k/16k/32k/50k:
   #   FULL      87.8 / 86.1 / 70.4 / 63.5 tok/s
