@@ -344,6 +344,12 @@ def ninfer_panel(d, x, t_ms, span_ms, top, bottom):
 
 
 def header(d, idx, n_prompts, pa):
+    # Careful with this subtitle and with `kicker` in final_card(): both have
+    # twice drifted back into claims that are not true of this picture. It is
+    # NOT "same weights" -- the middle lane runs the fast variant's int4-GPTQ
+    # lm_head and the left one does not, which is why their answers diverge --
+    # and it is not "speculative decoding only", because the middle lane is the
+    # whole serving stack and the right lane is a different engine altogether.
     d.text((PAD, 16), "Qwen3.8-27B decode speed", font=F_TITLE, fill=FG)
     d.text((PAD, 42), "one RTX 3090 @ 250 W · same prompts · lanes recorded separately",
            font=F_SUBTITLE, fill=DIM)
@@ -381,6 +387,7 @@ def arrow(d, x, y, w, color):
 
 def final_card(d, results, hero, top):
     key, label, ra, rb, _n_rate, ratio = hero
+    # See the note in header() before rewording this line.
     kicker = "SAME GPU · SAME MODEL · THIS REPO'S SERVING STACK"
     y = top
     d.text((W / 2 - d.textlength(kicker, font=F_FINAL_KICKER) / 2, y), kicker,
