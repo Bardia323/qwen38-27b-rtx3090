@@ -88,6 +88,93 @@ approximating it, and GSM8K reads 96.0-96.5% across the three columns. What
 the whole reason it is opt-in, and why the default stays where it is for anyone
 serving more than a few people. Every other knob: [single-user/](single-user/).
 
+### DFlash2 at 240k: `CTX=huge` (KVarN) also combines with `SPEC=dflash2`
+
+```bash
+bash kvarn/install.sh                # applies kvarn-v2-runner.patch as its second stage
+SPEC=dflash2 CTX=huge PREFIX_CACHE=1 bash single-user/start_qwen.sh
+```
+
+Where `CTX=long` doubles the DFlash2 pool with int8 KV (138k), the KVarN cache
+takes the same idea further: 268k tokens of pool at 245760 max-model-len, on the
+same pinned budget. No kernel work — the KVarN Triton kernels run unmodified on
+the V2 runner; the seven fixes in `kvarn/kvarn-v2-runner.patch` are allocator and
+geometry logic (the patch header walks through them, including an upstream vLLM
+bug in the mamba align resume path, and a NaN path in the DFlash2 candidate
+selector that KVarN noise exposes on verbatim-reproduction content). Two
+machines, both RTX 3090 at 250 W, `bench/labd_bench.py --ctx 20000` — the
+contributor's WSL2 box and this repo's bare-metal one, which do not agree on
+decode rate and do agree on everything else:
+
+| `SPEC=dflash2 CTX=huge PREFIX_CACHE=1` | WSL2 | bare metal |
+|---|---|---|
+| copy (reproduction) | 130 tok/s, 7.8 tok/step | 164 tok/s, 7.83 tok/step |
+| code / edit / quote / summary / qa | 89 / 65 / 44 / 38 / 36 | 109 / 83 / 58 / 51 / 43 |
+| all six tasks together | 53 tok/s, 3.0 tok/step | 67 tok/s, 3.15 tok/step |
+| verbatim reproduction, 25k document | correct | 1,150 / 1,150 chars |
+| KV capacity at 245760 max-model-len | 268,169 tokens | 268,169 tokens |
+| GSM8K exact-match (thinking off) | 97.0% (n=200) | 95.2% (n=600), 95.0% (n=200) |
+| 100k-deep needle, both turns | correct | — |
+| turn 2 over a 100k cached prefix | 4.7 s (vs 169 s cold) | — |
+
+<sub>Context for the GSM8K column: every configuration this repo already ships
+reads 95.0-96.5% on the same 200-question harness ([docs/quality.md](docs/quality.md)),
+and 95.0% is the batch-mode default. 95.2% at n=600 (±0.9 points) therefore sits
+inside the band rather than below it — which is the useful comparison, since this
+mode inherits KVarN's lossy 4/2-bit cache and should be judged against the other
+lossy configurations rather than against bf16. Repeat runs of the reproduction
+check on bare metal are bit-identical (same step count, same 1,150 characters),
+which is the property that was missing before `PIECEWISE` — see below.</sub>
+
+One caveat to the "all of it is lossless" paragraph above: the speculation here
+is still exact, but this mode inherits KVarN's 4/2-bit KV cache, which is lossy —
+the same trade `CTX=huge` already makes (deep-needle retrieval passes at 200k).
+On WSL2, set `VLLM_WSL2_ENABLE_PIN_MEMORY=1` — the V2 runner needs pinned
+memory, and vLLM leaves it off by default there; its UVA buffers work fine on
+the paravirt driver.
+
+One knob this mode sets for you: `cudagraph_mode=PIECEWISE`. Prefix caching and
+a *captured* (FULL) verify step do not currently mix on this path. On WSL2 that
+showed up as acceptance collapsing to about one token per step; on bare metal it
+also **corrupted the output** — special-token ids leaking into the stream, a
+different failure on every run, 1 of 1,176 characters matching the source
+instead of all of them. It is the capture rather than the drafter: eager is
+clean, `LOOKUP=0` is not, forcing a fixed verify-block length is not, and
+PIECEWISE — which keeps the compiled graphs and leaves only the multi-query
+verify uncaptured — restores both the speed and the correctness on both
+machines. So `CTX=huge` runs PIECEWISE and keeps prefix caching, which is worth
+having: turn 2 over a cached 100k document costs 4.7 s against 169 s cold.
+
+`CUDAGRAPH_MODE=FULL_AND_PIECEWISE` switches the capture back for anyone hunting
+the root cause. Treat that as unsafe rather than merely slower — the corruption
+above is what it does on bare metal.
+
+Two limits worth knowing before you point this at anything, both from an
+independent RTX 3090 Ti reproduction ([#13](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/13)):
+**it is a single-user mode, not a shared one.** At 8 concurrent streams the block
+verify batches badly — 16-73 tok/s per stream, ~131 aggregate, against ~447 for
+`SPEC=mtp` on bf16 KV on the same card. One person with a large document is what
+this is for; a crowd is what `batch/` is for. And `DFLASH_TOKENS=15` does not
+boot at this context on 24 GB — the pinned-buffer arithmetic in
+[docs/long-context.md](docs/long-context.md) says why — so reproduction mode and
+240k are mutually exclusive here; the default 7 is what this mode runs.
+
+It is a trade rather than a free win: dropping the full decode graphs costs
+short-prompt throughput. Same box, same script, only the capture toggled,
+three runs each:
+
+| | `copy` @25k | de | en | code |
+|---|---|---|---|---|
+| `FULL_AND_PIECEWISE` | 38 tok/s (1.97/step) | 78 | 125 | 202 |
+| PIECEWISE (default here) | **132 tok/s (7.83/step)** | 74 | 102 | 176 |
+
+3.5x on the long shared prefix this mode exists for, 13-18% off short-prompt
+decode. The capture mode is fixed at boot, so `CTX=huge` takes the trade that
+matches what it is for. `CUDAGRAPH_MODE=FULL_AND_PIECEWISE` switches back, but
+treat that as unsafe until the capture bug is understood — here it only cost
+speed, on a bare-metal tree it corrupted the output. The hunt is in the PR
+thread.
+
 ## Benchmarks
 
 Full tables per mode in [batch/README.md](batch/README.md) and
