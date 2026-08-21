@@ -71,6 +71,18 @@ if [ "${PREFIX_CACHE:-0}" = "1" ]; then
   EXTRA_ARGS="--enable-prefix-caching --mamba-cache-mode align ${EXTRA_ARGS}"
 fi
 
+# Tool / function calling. Without BOTH flags vLLM rejects any request carrying
+# `tools` with tool_choice "auto": 400 '"auto" tool choice requires
+# --enable-auto-tool-choice and --tool-call-parser to be set'. TOOLS=0 turns it off.
+# The parser has to match the format the chat template asks the model for, and
+# Qwen3.8's asks for XML -- <tool_call><function=NAME><parameter=K>V</parameter> --
+# NOT the JSON body that `hermes`, the usual answer for a Qwen model, reads. Getting
+# that wrong does not error: the call comes back as ordinary content and the client
+# sees no tool_calls. qwen3_xml is the tool-side adapter of the same parser engine as
+# --reasoning-parser qwen3 (vllm/parser/qwen3.py); qwen3_coder and mimo alias it.
+TOOL_PARSER=${TOOL_PARSER:-qwen3_xml}
+TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-parser $TOOL_PARSER)
+
 export PATH="$REPO/venv/bin:$PATH"
 # Overridable for WSL2 (see single-user/start_qwen.sh).
 export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
@@ -99,4 +111,5 @@ exec venv/bin/vllm serve "$MODEL" \
   --max-num-batched-tokens 2048 \
   --compilation-config "{\"max_cudagraph_capture_size\":64,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \
   --reasoning-parser qwen3 \
+  ${TOOL_ARGS} \
   ${EXTRA_ARGS}

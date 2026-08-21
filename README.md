@@ -374,6 +374,12 @@ curl http://localhost:18020/v1/chat/completions \
 Qwen recommends temperature 0.7 / top_p 0.8 for instruct mode, and 1.0 / 0.95
 with thinking enabled (the default).
 
+Tool calling works over the same endpoint — send `tools` with `tool_choice:
+"auto"` and the reply carries `tool_calls`. Both launchers set
+`--enable-auto-tool-choice --tool-call-parser qwen3_xml`; the parser has to be
+`qwen3_xml` because this model's chat template emits Qwen's XML call format and
+not the JSON that `hermes` reads. `TOOLS=0` turns it off.
+
 To check the numbers on your own card: `bash verify.sh` (also probes the live
 server and prints which attention backend and KV pool it came up with), then
 `bash bench/run_benchmarks.sh batch` or `... single` reproduces the tables

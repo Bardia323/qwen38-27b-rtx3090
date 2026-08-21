@@ -257,6 +257,18 @@ fi
 # 0.27.1: --no-async-scheduling is what turns it off.
 ASYNC_ARGS=$([ "${ASYNC_SCHED:-1}" = 1 ] && echo --async-scheduling || echo --no-async-scheduling)
 
+# Tool / function calling. Without BOTH flags vLLM rejects any request carrying
+# `tools` with tool_choice "auto": 400 '"auto" tool choice requires
+# --enable-auto-tool-choice and --tool-call-parser to be set'. TOOLS=0 turns it off.
+# The parser has to match the format the chat template asks the model for, and
+# Qwen3.8's asks for XML -- <tool_call><function=NAME><parameter=K>V</parameter> --
+# NOT the JSON body that `hermes`, the usual answer for a Qwen model, reads. Getting
+# that wrong does not error: the call comes back as ordinary content and the client
+# sees no tool_calls. qwen3_xml is the tool-side adapter of the same parser engine as
+# --reasoning-parser qwen3 (vllm/parser/qwen3.py); qwen3_coder and mimo alias it.
+TOOL_PARSER=${TOOL_PARSER:-qwen3_xml}
+TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-parser $TOOL_PARSER)
+
 export PATH="$REPO/venv/bin:$PATH"
 # Overridable: expandable_segments needs CUDA VMM, which WSL2's paravirt
 # driver rejects ("CUDA driver error: device not ready" during Marlin repack)
@@ -283,4 +295,5 @@ exec venv/bin/vllm serve "$MODEL" \
   --speculative-config "$SPEC_CFG" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]${CG_MODE}}" \
   --reasoning-parser qwen3 \
+  ${TOOL_ARGS} \
   ${EXTRA_ARGS}
