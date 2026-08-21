@@ -20,16 +20,16 @@ Realistic chat prompts (8 mixed English/Danish/code tasks in
 
 | Cohort | decode, model-default sampling (T 1.0, top-p 0.95, top-k 20) | decode, greedy | tokens per step | e2e (default / greedy) | mean TTFT |
 |---|---|---|---|---|---|
-| C1 | **113.6 tok/s** | **118.3 tok/s** | 2.82 / 2.88 | 111.1 / 115.3 | 172 ms |
-| C2 | 194.0 tok/s | 194.9 tok/s | 2.87 / 2.83 | 173.1 / 175.9 | 278 ms |
-| C4 | 258.6 tok/s | 292.6 tok/s | 2.71 / 2.98 | 220.9 / 256.2 | 341 ms |
-| C8 | 379.9 tok/s | 404.0 tok/s | 2.71 / 2.79 | 309.2 / 321.9 | 1,006 ms |
+| C1 | **111.1 tok/s** | **120.0 tok/s** | 2.75 / 2.90 | 108.7 / 116.9 | 164 ms |
+| C2 | 191.8 tok/s | 199.4 tok/s | 2.80 / 2.87 | 174.9 / 177.0 | 223 ms |
+| C4 | 268.5 tok/s | 280.9 tok/s | 2.79 / 2.90 | 226.2 / 252.4 | 340 ms |
+| C8 | 407.3 tok/s | 414.3 tok/s | 2.88 / 2.88 | 328.7 / 334.6 | 1,005 ms |
 
 Decode throughput — C × 1000 / mean TPOT — is the number to read: it is the rate
 you feel once generation starts. The e2e column includes prefill and the tail of
 the slowest request, so it is lower by construction.
 Per-position draft acceptance at C1: 74% / 50% / 34% / 24% (T 1.0), 77% / 55%
-/ 40% / 30% (greedy). The best C1 repeats read 115 / 124 tok/s decode: greedy
+/ 40% / 30% (greedy). The best C1 repeats read 119 / 120 tok/s decode: greedy
 generation is deterministic for a given server and request order, but a
 different drafter config or a prefix-cache hit changes the text at near-ties
 and with it the acceptance, so expect ±3-5% between runs. Quality of the fast
@@ -58,10 +58,10 @@ this mode from C8 up.
 
 | Cohort | decode, model-default sampling | decode, greedy | tokens per step | e2e (default / greedy) | mean TTFT |
 |---|---|---|---|---|---|
-| C1 | **122.1 tok/s** | **131.9 tok/s** | 3.14 / 3.34 | 119.2 / 126.6 | 170 ms |
-| C2 | 191.4 tok/s | 209.6 tok/s | 3.06 / 3.34 | 172.6 / 191.1 | 227 ms |
-| C4 | 286.7 tok/s | 309.6 tok/s | 3.25 / 3.48 | 233.8 / 254.1 | 343 ms |
-| C8 | 373.7 tok/s | 390.6 tok/s | 3.36 / 3.28 | 257.3 / 241.3 | 2,603 ms |
+| C1 | **121.8 tok/s** | **131.2 tok/s** | 3.12 / 3.34 | 118.6 / 127.1 | 165 ms |
+| C2 | 195.5 tok/s | 214.6 tok/s | 3.08 / 3.36 | 173.4 / 189.2 | 228 ms |
+| C4 | 278.9 tok/s | 285.7 tok/s | 3.18 / 3.22 | 240.2 / 246.7 | 342 ms |
+| C8 | 389.9 tok/s | 405.5 tok/s | 3.37 / 3.45 | 252.1 / 274.1 | 2,688 ms |
 
 The C1 row is the best of several runs; expect 117-127 e2e depending on the session.
 Greedy repeats *within* a server session are bit-identical (four in a row: 125.0-126.6 e2e,
@@ -85,7 +85,7 @@ decode rate is higher at every cohort. Where it is *not* the better choice:
 - **C8 and up**: every request reserves 1+k = 8 recurrent-state slots (≈0.7 GB,
   vs 5 slots / 0.44 GB for MTP k=4), so only 5-6 long generations are resident
   and the rest queue (the 5 s TTFT above, `Running: 5 reqs, Waiting: 3`). MTP
-  reads 309 tok/s e2e at C8, DFlash2 235. One GPU, 1-4 users: DFlash2; more:
+  reads 329 tok/s e2e at C8, DFlash2 252. One GPU, 1-4 users: DFlash2; more:
   MTP or batch mode.
 - **Long contexts**: the drafter attends to a 2,048-token window. On a 12k /
   36k-token summarization prompt (chat API) it accepts 2.3-2.6 tokens per step
@@ -226,11 +226,12 @@ the last bits of the logits — gotcha 14), not a change of distribution: the lo
 positions carry a point mass, which is a legal proposal for the rejection sampler, and
 greedy verification never reads the draft distribution at all.
 
-The same server measured on the random-token protocol used by
-[ninfer-3090](https://github.com/Don-Chad/ninfer-3090) (256 random tokens in,
-1,024 out) reads anywhere from 35 to 151 tok/s depending on what the model
-makes of the noise — this is why the tables above use real prompts. Their MTP3
-number on that protocol is 70.19 tok/s at C1.
+The same server measured on random tokens (256 in, 1,024 out) reads anywhere from
+35 to 151 tok/s depending on what the model makes of the noise — which is why the
+tables above use real prompts. For comparison against another engine on this card,
+[ninfer-3090](https://github.com/Don-Chad/ninfer-3090) publishes 71.00 tok/s decode
+at C1 on its own protocol (short real prompts, thinking on); the caveats are in the
+[main README](../README.md#vs-ninfer-3090).
 
 ### How the draft got cheap
 

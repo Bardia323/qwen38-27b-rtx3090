@@ -30,10 +30,12 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
    layer set and dies with `KeyError: 'input_global_scale'`. Our patch
    registers the selection env vars with vLLM so they become part of the cache
    key; if you invent your own, `VLLM_DISABLE_COMPILE_CACHE=1`.
-6. **Random-token benchmarks flatter speculative decoding.** See the ninfer
-   section: the same server does 35, 83 or 151 tok/s on `--dataset-name random`
-   depending on what the noise turns into. Use real prompts
-   (`--dataset-name custom`).
+6. **Random-token benchmarks are meaningless for speculative decoding.** The same
+   server does 35, 83 or 151 tok/s on `--dataset-name random` depending on what
+   the noise turns into, because acceptance depends entirely on whether the
+   drafter can guess it. Use real prompts (`--dataset-name custom`). (This is our
+   own measurement, not a description of anyone else's harness — ninfer-3090's
+   published cohorts use short real prompts, not random tokens.)
 7. **Bigger prefill chunks make things worse.** `--max-num-batched-tokens
    8192` inflates the profiled activation peak, which shrinks the cache pool,
    which caps concurrency. 2048 wins on this card.

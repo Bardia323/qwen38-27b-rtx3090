@@ -9,8 +9,8 @@ API with key auth, and two ready-made configs depending on what you're doing:
 | | [batch/](batch/) | [single-user/](single-user/) |
 |---|---|---|
 | for | API backends, pipelines, many concurrent requests | one or a few people chatting |
-| aggregate, 64 concurrent (128 in / 512 out) | **~1,094 tok/s** steady-state decode, 942 end-to-end (~1,222 / 1,042 with all layers int8) | n/a (8 slots) |
-| single-stream (C1) decode rate, realistic prompts | 46 tok/s | MTP: **114** tok/s at default sampling, **118** greedy (`CTX=fast`, 64k; 85 / 89 with `CTX=long`, 150k). DFlash2 (`SPEC=dflash2`): **122** default, **132** greedy |
+| aggregate, 64 concurrent (128 in / 512 out) | **~1,035 tok/s** steady-state decode, 948 end-to-end (~1,222 / 1,042 with all layers int8) | n/a (8 slots) |
+| single-stream (C1) decode rate, realistic prompts | 46 tok/s | MTP: **111** tok/s at default sampling, **120** greedy (`CTX=fast`, 64k; 85 / 89 with `CTX=long`, 150k). DFlash2 (`SPEC=dflash2`): **122** default, **131** greedy |
 | reproducing its own context (quoting a document, applying an edit) | 46 tok/s | **381 tok/s** at 25k context — 15.0 tokens per verify step, drafted straight from the prompt (`SPEC=dflash2` + `DFLASH_TOKENS=15`) |
 | trick | 16-bit recurrent state + int8 tensor-core GEMMs | MTP speculation with 4 cheap drafts, a draft vocabulary that covers what the model says, calibrated int4 lm_head/drafter, split-KV verify attention; optionally DFlash2 (7 drafts in one pass, int4-requantized, vLLM PR #52816 backported) with a verify block the context fills |
 
@@ -43,7 +43,7 @@ patches, `verify.sh`) — see [Setup](#setup). Then pick a mode:
 ### If you are the only user, do this
 
 The command above starts the conservative default — MTP speculation, 8 request
-slots, 64k context, 118 tok/s greedy at C1. Three settings are worth more than
+slots, 64k context, 120 tok/s greedy at C1. Three settings are worth more than
 every other knob in this repo put together:
 
 ```bash
@@ -97,26 +97,36 @@ Full tables per mode in [batch/README.md](batch/README.md) and
 
 ### vs. ninfer-3090
 
-[ninfer-3090](https://github.com/Don-Chad/ninfer-3090) publishes cohort benchmarks
-for this model on this card, using C concurrent requests of random tokens. Random
-tokens are a bad yardstick for speculative decoding — acceptance swings between 80%
-and near zero with the sample — so ours are 8 realistic chat prompts (English,
-Danish, code), 1,024-token answers, model-default sampling:
+[ninfer-3090](https://github.com/Don-Chad/ninfer-3090) is a standalone C++/CUDA engine
+that publishes cohort benchmarks for this model on this card. Theirs are 1,024-token
+answers from 29-34-token prompts, greedy, MTP3, int8 KV, prefix reuse off, an
+8,192-token context window, and **thinking on** at `reasoning_effort=medium`, so their
+1,024 tokens include reasoning. Ours are 8 realistic chat prompts (English, Danish,
+code), 1,024-token answers, model-default sampling, thinking off:
 
-| Cohort | ninfer-3090 (MTP3, random tokens) | this repo, batch | single-user, MTP | single-user, DFlash2 |
+| Cohort | ninfer-3090 (MTP3) | this repo, batch | single-user, MTP | single-user, DFlash2 |
 |---|---|---|---|---|
-| C1 | 70.19 tok/s | 45.4 | 113.6 | **122.1** |
-| C2 | 89.43 tok/s | 82.6 | **194.0** | 191.4 |
-| C4 | 97.89 tok/s | 165.6 | 258.6 (289.2 with `CTX=long`) | **286.7** |
-| C8 | 161.28 tok/s | 298.5 | **379.9** (409.0 with `CTX=long`) | 373.7 |
-| C64 (128 in / 512 out) | not supported | **~1,094** | — | — |
+| C1 | 71.00 tok/s | 45.5 | 111.1 | **121.8** |
+| C2 | 90.66 tok/s | 86.3 | 191.8 | **195.5** |
+| C4 | 100.28 tok/s | 168.3 | 268.5 | **278.9** |
+| C8 | 165.33 tok/s | 324.9 | **407.3** | 389.9 |
+| C64 (128 in / 512 out) | not supported | **~1,035** | — | — |
 
-Decode rate (C × 1000 / mean TPOT), best of the runs we have, from
-`bench/run_benchmarks.sh`; greedy instead of default sampling reads
-131.9 / 209.6 / 309.6 / 390.6 for DFlash2. The C64 and DFlash2 columns are from the
-current stack, the other two from earlier runs; ninfer's published figures are their
-own protocol. Peak VRAM is comparable to theirs (23.0 vs 22.1 GiB at C8) — the gap is
-mostly vLLM's continuous batching plus the memory this repo's requantization frees up.
+Decode rate, C × 1000 / mean TPOT. All four of our columns were re-measured together
+on the current stack with `bench/run_benchmarks.sh`, keeping the second run after each
+restart as the script advises; greedy instead of default sampling reads
+131.2 / 214.6 / 285.7 / 405.5 for DFlash2. Run-to-run spread on the same server is
+5-8%, so treat one-decimal differences between the three right-hand columns as noise —
+C1 and C8 are where the modes genuinely separate.
+
+Theirs is the **decode** column of their table; their end-to-end column reads
+70.19 / 89.43 / 97.89 / 161.28, and an earlier version of this table quoted *those*
+against our decode rate, which was not like-for-like. What still is not like-for-like,
+in their favour and ours: their C1 is a single prompt in a single run with no error
+bars, thinking is on for them and off for us, and they publish no power limit or driver
+version — ours is an RTX 3090 pinned at 250 W. Peak VRAM is comparable (23.0 vs
+22.1 GiB at C8). The gap is mostly vLLM's continuous batching plus the memory this
+repo's requantization frees up.
 
 ### Quality
 
@@ -169,8 +179,8 @@ greedy):
 (Steps 4-6 are the same 8-prompt protocol; greedy is deterministic for a
 given server and request order but differs between configs and even with
 prefix-cache hits, so single runs carry ±3-5% on tokens/step —
-`bench/run_benchmarks.sh single` reproduces 113.6 / 118.3 tok/s decode at C1,
-the best repeats read 115 / 124.)
+`bench/run_benchmarks.sh single` reproduces 111.1 / 120.0 tok/s decode at C1,
+the best repeats read 119 / 124.)
 Going deeper (k=5) loses again: 106 / 105. k=4 is the knee, but on vLLM
 0.27.1's FlashInfer backend (needed for fp8 KV, i.e. for 150k context) four
 drafts crash the engine with an illegal memory access as soon as one request
