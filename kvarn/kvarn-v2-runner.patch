@@ -38,8 +38,9 @@ V2 runner; every blocker was allocator/geometry logic:
     finite values before sampling/caching, clamp the walk index, initialize
     the selector token buffer with zeros instead of empty. Verified: 6/6
     labd tasks pass at 240k, copy output verbatim (599/600 chars vs the
-    source, identical to MTP), GSM8K 95.0-95.5% (n=100/200, author reference
-    96.0-96.5), needle + prefix resume unchanged. NOTE the third part was
+    source, identical to MTP), GSM8K 97.0% (n=200 on the shipped config,
+    author reference 96.0-96.5), needle + prefix resume unchanged. NOTE the
+    third part was
     re-cut for current main: lookup-v2 gave _selector_tokens an explicit
     (max_num_reqs, draft_block) shape, so the old torch.empty_like pre-image
     is gone and the hunk silently dropped on newer trees. kvarn/install.sh

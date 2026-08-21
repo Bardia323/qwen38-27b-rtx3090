@@ -110,7 +110,7 @@ bare-metal validation pending), `bench/labd_bench.py --ctx 20000`:
 | copy (reproduction, 7.8 tok per verify step) | 130 |
 | code / edit / quote / summary / qa | 89 / 65 / 44 / 38 / 36 |
 | all six tasks together (3.0 tok per verify step) | 53 |
-| GSM8K exact-match (200 q, greedy, thinking off) | 95.5% |
+| GSM8K exact-match (200 q, thinking off; author reference 96.0-96.5) | 97.0% |
 | KV capacity at 245760 max-model-len | 268,169 tokens |
 | 100k-deep needle, both turns | correct |
 | turn 2 over a 100k cached prefix | 4.7 s (vs 169 s cold) |
