@@ -102,23 +102,41 @@ the V2 runner; the seven fixes in `kvarn/kvarn-v2-runner.patch` are allocator an
 geometry logic (the patch header walks through them, including an upstream vLLM
 bug in the mamba align resume path, and a NaN path in the DFlash2 candidate
 selector that KVarN noise exposes on verbatim-reproduction content). RTX 3090
-under WSL2 at a 200 W power limit (all numbers in this section are WSL2 —
+under WSL2 at a 250 W power limit (all numbers in this section are WSL2 —
 bare-metal validation pending), `bench/labd_bench.py --ctx 20000`:
 
 | `SPEC=dflash2 CTX=huge PREFIX_CACHE=1` | tok/s |
 |---|---|
-| copy / edit (reproduction, 6.4 tok per verify step) | 114 / 109 |
-| code / quote / summary / qa | 85 / 44 / 38 / 34 |
+| copy (reproduction, 7.8 tok per verify step) | 130 |
+| code / edit / quote / summary / qa | 89 / 65 / 44 / 38 / 36 |
+| all six tasks together (3.0 tok per verify step) | 53 |
 | GSM8K exact-match (200 q, greedy, thinking off) | 95.5% |
-| KV capacity at 240k max-model-len | 268k tokens |
-| 200k-deep needle | correct |
-| turn 2 over a 200k cached prefix | 4.4 s (vs ~7.5 min cold) |
+| KV capacity at 245760 max-model-len | 268,169 tokens |
+| 100k-deep needle, both turns | correct |
+| turn 2 over a 100k cached prefix | 4.7 s (vs 169 s cold) |
 
 One caveat to the "all of it is lossless" paragraph above: the speculation here
 is still exact, but this mode inherits KVarN's 4/2-bit KV cache, which is lossy —
 the same trade `CTX=huge` already makes (deep-needle retrieval passes at 200k).
-On WSL2, set `VLLM_WSL_PIN_MEMORY=1` — the V2 runner's UVA buffers work fine on
-the paravirt driver; vLLM's blanket pin-memory ban predates it.
+On WSL2, set `VLLM_WSL2_ENABLE_PIN_MEMORY=1` — the V2 runner needs pinned
+memory, and vLLM leaves it off by default there; its UVA buffers work fine on
+the paravirt driver.
+
+One knob this mode sets for you: `cudagraph_mode=PIECEWISE`. Prefix caching and
+a *captured* (FULL) verify step do not currently mix on this path — acceptance
+collapses to about one token per step, and on bare metal the output degrades
+outright. It is the capture rather than the drafter (eager is clean, and so is
+PIECEWISE, which keeps the compiled graphs and leaves only the multi-query
+verify uncaptured), so `CTX=huge` runs PIECEWISE and keeps prefix caching.
+Same box, same script, only the capture toggled:
+
+| `copy`, 25k prompt | tok per verify step | tok/s |
+|---|---|---|
+| `CUDAGRAPH_MODE=FULL_AND_PIECEWISE` | 1.97 | 39 |
+| PIECEWISE (the default here) | 7.83 | 130 |
+
+`CUDAGRAPH_MODE=FULL_AND_PIECEWISE` puts the captured verify back once that is
+understood; the hunt is in the PR thread.
 
 ## Benchmarks
 
