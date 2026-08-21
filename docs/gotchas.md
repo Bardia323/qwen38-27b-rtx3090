@@ -249,3 +249,25 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     was enough for the reporter of
     [#12](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/12). Setting `KV_MEM=`
     empty falls back to `GPU_UTIL`, which profiles the actual free memory instead.
+36. **A model dir with no `tokenizer.json` is not an error to transformers — it is an
+    empty vocabulary, and vLLM reports it as a reasoning-parser problem.**
+    `AutoTokenizer.from_pretrained` on a dir that has `config.json` but no tokenizer
+    files returns a `Qwen2Tokenizer` with `vocab_size == 1` that encodes *everything*
+    to `[]` — `tok.encode("hello world")` is `[]`, not an exception. Nothing complains
+    until `VllmConfig.__post_init__` asks the qwen3 reasoning parser for `<think>`,
+    gets `[]` back, and raises
+
+    ```
+    ReasoningConfig: failed to tokenize reasoning strings:
+    reasoning_start_str='', reasoning_end_str=''.
+    ```
+
+    which names neither the tokenizer nor the directory, and prints the strings as
+    empty because they are the *unset* config fields, not the ones the parser supplied.
+    Reported as [#15](https://github.com/syv-ai/qwen38-27b-rtx3090/issues/15), where it
+    looked like a `SPEC=dflash2` bug: it reproduces with no speculative config at all,
+    and the reason only the single-user modes failed is that they serve
+    `models/Qwen3.8-27B-W4A16-AutoRound-fast` while batch mode serves the base dir.
+    `verify.sh` now encodes `<think>` against every dir we pass to `--model` instead of
+    only checking that the dir exists, and `docker/prepare.sh` counts `tokenizer.json`
+    as part of a complete download.

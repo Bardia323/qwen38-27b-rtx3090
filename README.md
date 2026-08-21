@@ -32,8 +32,15 @@ the server; the API is OpenAI-compatible on port 18020):
 
 ```bash
 git clone https://github.com/syv-ai/qwen38-27b-rtx3090 && cd qwen38-27b-rtx3090
-echo "VLLM_API_KEY=$(openssl rand -hex 24)" > .env
 docker compose --profile single up -d      # one or a few users; or --profile batch
+```
+
+The server listens on `0.0.0.0` and is unauthenticated unless you give it a key.
+For anything past your own machine, add one first — everything reads it from
+`.env` or `api_key.txt`, and nothing needs it otherwise:
+
+```bash
+echo "VLLM_API_KEY=$(openssl rand -hex 24)" > .env
 ```
 
 Or by hand in a venv (same steps: model download, requantization, vLLM
@@ -321,7 +328,7 @@ done
 # optional: the KVarN 4/2-bit KV cache for 262k context (docs/long-context.md)
 bash kvarn/install.sh
 
-# api key
+# api key — optional, but the server binds 0.0.0.0 and is open without one
 openssl rand -hex 24 > api_key.txt
 ```
 
@@ -338,7 +345,7 @@ JIT). Test it:
 
 ```bash
 curl http://localhost:18020/v1/chat/completions \
-  -H "Authorization: Bearer $(cat api_key.txt)" \
+  -H "Authorization: Bearer $(cat api_key.txt 2>/dev/null)" \
   -H "Content-Type: application/json" \
   -d '{"model": "qwen3.8-27b",
        "messages": [{"role": "user", "content": "hej"}],
