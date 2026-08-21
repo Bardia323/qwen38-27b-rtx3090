@@ -236,3 +236,16 @@ Things that each cost us hours, in rough order of pain. Worth skimming before yo
     binary search over `max_memory_usage_bytes`, which rounds up to whole blocks, so the
     estimate is quantised by the block size: at an 864-token block the granularity is coarse
     and a two-point inversion at small lengths is unreliable.
+35. **`KV_MEM` assumes the card is headless, and the failure lands long after
+    startup looks fine.** The single-user pool is pinned in bytes rather than sized
+    from `GPU_UTIL` (gotcha 33 and the comment in `single-user/start_qwen.sh` say
+    why), and 5.2 GiB is what fits when nothing else is on the GPU. With a desktop
+    session on the same card — Xorg plus a compositor plus a browser is easily
+    ~1.3 GiB — the server still starts, still captures its graphs, still reports a
+    pool, and then dies later on a real request when the spec-decode `part_o`
+    buffer cannot get its ~1.5 GiB (`spec_decode_attn.py`). Nothing at startup
+    warns you. On a card you also render on, drop `KV_MEM` by at least what the
+    desktop is holding (`nvidia-smi` before you start the server): `KV_MEM=4000000000`
+    was enough for the reporter of
+    [#12](https://github.com/syv-ai/qwen38-27b-rtx3090/pull/12). Setting `KV_MEM=`
+    empty falls back to `GPU_UTIL`, which profiles the actual free memory instead.
