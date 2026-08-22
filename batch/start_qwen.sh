@@ -34,10 +34,10 @@ API_SERVERS=${API_SERVERS:-1}
 # KV=kvarn: the KVarN 4-bit-key / 2-bit-value cache (kvarn/ in this repo,
 # needs `bash kvarn/install.sh` once): 262k context, ~2x the token capacity,
 # +0.2% perplexity, ~20% slower decode at long context and lower short-request
-# throughput (see docs/long-context.md).
+# throughput (see README "262k context").
 # KV=int4pth: vLLM's built-in int4 per-token-head KV cache on the Triton
 # attention backend: 262k context with no extra install, ~1.5x slower decode /
-# 2.3x slower prefill at 100k than fp8 (docs/long-context.md).
+# 2.3x slower prefill at 100k than fp8 (main README, "per-token-head modes").
 KV=${KV:-fp8}
 if [ "$KV" = "int4pth" ]; then
   MAX_LEN=${MAX_LEN:-262144}
@@ -60,38 +60,14 @@ fi
 INT8_ACT=${INT8_ACT-int8}
 INT8_LAYERS=${INT8_LAYERS-mlp}
 
-# PREFIX_CACHE=1: reuse the KV of a shared prompt prefix across requests, and resume the
-# recurrent (GDN) state from the last cached block boundary. For an API backend where every
-# request carries the same system prompt / document this is the difference between paying
-# for that prefix once and paying for it every time: 64 requests sharing a 5.8k-token system
-# prompt (conc 32) take 222 s without it and 17 s with it. Costs ~14% of the KV pool
-# (223,821 -> 193,298 tokens) and nothing on workloads with no shared prefix (870 vs 876
-# tok/s on the 128/512 row). Hybrid models keep this opt-in upstream.
-if [ "${PREFIX_CACHE:-0}" = "1" ]; then
-  EXTRA_ARGS="--enable-prefix-caching --mamba-cache-mode align ${EXTRA_ARGS}"
+export PATH="$REPO/venv/bin:$PATH"
+
+if ! uname -r | grep -q -i "microsoft"; then
+  export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+else
+  export VLLM_WORKER_MULTIPROC_METHOD=spawn
 fi
 
-# Tool / function calling. Without BOTH flags vLLM rejects any request carrying
-# `tools` with tool_choice "auto": 400 '"auto" tool choice requires
-# --enable-auto-tool-choice and --tool-call-parser to be set'. TOOLS=0 turns it off.
-#
-# qwen3_coder is a deliberate choice for this model, not a vLLM default and not a
-# leftover -- do NOT "correct" it to hermes. The parser has to match the format the
-# chat template asks the model for, and Qwen3.8's asks for XML --
-# <tool_call><function=NAME><parameter=K>V</parameter> -- NOT the JSON body that
-# hermes, the usual answer for a Qwen model, reads. Getting that wrong does not
-# error: the call comes back as ordinary content and the client sees no tool_calls,
-# which reads as the model being bad at tools rather than as a misconfigured server.
-# The name is the call format, not the checkpoint -- nothing here is Qwen3-Coder.
-# qwen3_coder, qwen3_xml and mimo are three names for one Qwen3EngineToolParser in
-# 0.27.1, which is the tool-side adapter of the same parser engine that
-# --reasoning-parser qwen3 already uses (vllm/parser/qwen3.py).
-TOOL_PARSER=${TOOL_PARSER:-qwen3_coder}
-TOOL_ARGS=$([ "${TOOLS:-1}" = 1 ] && echo --enable-auto-tool-choice --tool-call-parser $TOOL_PARSER)
-
-export PATH="$REPO/venv/bin:$PATH"
-# Overridable for WSL2 (see single-user/start_qwen.sh).
-export PYTORCH_CUDA_ALLOC_CONF=${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}
 # flashinfer's sampling.cu does not build with older system nvcc (12.0);
 # the attention kernels JIT fine. Remove this if you have a recent CUDA toolkit.
 export VLLM_USE_FLASHINFER_SAMPLER=0
@@ -117,5 +93,4 @@ exec venv/bin/vllm serve "$MODEL" \
   --max-num-batched-tokens 2048 \
   --compilation-config "{\"max_cudagraph_capture_size\":64,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]}" \
   --reasoning-parser qwen3 \
-  ${TOOL_ARGS} \
   ${EXTRA_ARGS}

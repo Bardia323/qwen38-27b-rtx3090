@@ -9,3 +9,9 @@ venv/
 drafter/data/
 drafter/runs/
 .env
+HERMES_SETUP.md
+.venv-patch-backup/
+*.upstream
+.hermes_compat.py
+.serve_persist.sh
+.smoke_pc.sh
