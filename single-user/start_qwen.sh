@@ -238,6 +238,13 @@ fi
 
 export VLLM_USE_FLASHINFER_SAMPLER=0
 
+# --language-model-only skips the vision tower (~2.7 GB). Qwen3.8-27B ships as a VL
+# checkpoint (Qwen3_5ForConditionalGeneration) so this is right for the stock model and
+# stays the default. Some third-party quants are exported text-only already
+# (Qwen3_5ForCausalLM, e.g. the abliterated builds) and have no tower to skip; set
+# LM_ONLY=0 for those.
+LM_ONLY_ARG=$([ "${LM_ONLY:-1}" = 1 ] && echo --language-model-only)
+
 if [ -z "$VLLM_API_KEY" ] && [ -f "$REPO/api_key.txt" ]; then
   export VLLM_API_KEY="$(cat "$REPO/api_key.txt")"
 fi
@@ -249,7 +256,7 @@ exec "$VENV/bin/vllm" serve "$MODEL" \
   --max-model-len $MAX_LEN \
   --max-num-seqs $MAX_SEQS \
   --api-server-count $API_SERVERS \
-  --language-model-only \
+  ${LM_ONLY_ARG} \
   $ATTN_ARGS \
   --mamba-ssm-cache-dtype float16 \
   ${ASYNC_ARGS} \

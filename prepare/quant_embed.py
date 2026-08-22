@@ -14,6 +14,7 @@ Measured on an RTX 3090: another ~1.3 GB freed, round-trip error 0.56%.
 
 import copy
 import json
+import os
 import shutil
 import sys
 
@@ -28,10 +29,19 @@ QMAX = 127
 
 d = sys.argv[1].rstrip("/") + "/"
 
-idx = json.load(open(d + "model.safetensors.index.json"))
-wm = idx["weight_map"]
-key = next(k for k in wm if k.endswith("embed_tokens.weight"))
-shard = wm[key]
+# Same as quant_lm_head.py: sharded checkpoints have an index, single-file ones do not.
+if os.path.exists(d + "model.safetensors.index.json"):
+    idx = json.load(open(d + "model.safetensors.index.json"))
+    wm = idx["weight_map"]
+    key = next(k for k in wm if k.endswith("embed_tokens.weight"))
+    shard = wm[key]
+else:
+    idx = wm = None
+    shard = "model.safetensors"
+    if not os.path.exists(d + shard):
+        sys.exit(f"no model.safetensors.index.json and no {shard} in {d}")
+    with safe_open(d + shard, framework="pt") as _f:
+        key = next(k for k in _f.keys() if k.endswith("embed_tokens.weight"))
 print(f"{key} lives in {shard}")
 
 tensors = {}
@@ -62,10 +72,11 @@ tensors[key.replace(".weight", ".weight_shape")] = torch.tensor([out_f, in_f], d
 shutil.copy(d + shard, d + shard + ".bak_embed")
 save_file(tensors, d + shard, metadata=meta or {"format": "pt"})
 
-del wm[key]
-for s in ("weight_packed", "weight_scale", "weight_shape"):
-    wm[key.replace(".weight", "." + s)] = shard
-json.dump(idx, open(d + "model.safetensors.index.json", "w"), indent=2)
+if wm is not None:
+    del wm[key]
+    for s in ("weight_packed", "weight_scale", "weight_shape"):
+        wm[key.replace(".weight", "." + s)] = shard
+    json.dump(idx, open(d + "model.safetensors.index.json", "w"), indent=2)
 
 c = json.load(open(d + "config.json"))
 qc = c["quantization_config"]

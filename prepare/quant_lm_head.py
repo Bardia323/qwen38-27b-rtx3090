@@ -14,6 +14,7 @@ config.json. Backups are written next to the originals (.bak / .bak-quant).
 
 import copy
 import json
+import os
 import shutil
 import sys
 
@@ -29,9 +30,18 @@ KEY = "lm_head.weight"
 
 d = sys.argv[1].rstrip("/") + "/"
 
-idx = json.load(open(d + "model.safetensors.index.json"))
-wm = idx["weight_map"]
-shard = wm[KEY]
+# Sharded checkpoints carry an index; small ones (some third-party quants) are a single
+# model.safetensors with no index at all. Support both — there is nothing to rewrite in
+# the single-file case, so wm stays None and the index update below is skipped.
+if os.path.exists(d + "model.safetensors.index.json"):
+    idx = json.load(open(d + "model.safetensors.index.json"))
+    wm = idx["weight_map"]
+    shard = wm[KEY]
+else:
+    idx = wm = None
+    shard = "model.safetensors"
+    if not os.path.exists(d + shard):
+        sys.exit(f"no model.safetensors.index.json and no {shard} in {d}")
 print(f"{KEY} lives in {shard}")
 
 tensors = {}
@@ -59,11 +69,12 @@ tensors["lm_head.weight_shape"] = torch.tensor([out_f, in_f], dtype=torch.int64)
 shutil.copy(d + shard, d + shard + ".bak")
 save_file(tensors, d + shard, metadata=meta or {"format": "pt"})
 
-shutil.copy(d + "model.safetensors.index.json", d + "model.safetensors.index.json.bak-quant")
-del wm[KEY]
-for s in ("weight_packed", "weight_scale", "weight_shape"):
-    wm[f"lm_head.{s}"] = shard
-json.dump(idx, open(d + "model.safetensors.index.json", "w"), indent=2)
+if wm is not None:
+    shutil.copy(d + "model.safetensors.index.json", d + "model.safetensors.index.json.bak-quant")
+    del wm[KEY]
+    for s in ("weight_packed", "weight_scale", "weight_shape"):
+        wm[f"lm_head.{s}"] = shard
+    json.dump(idx, open(d + "model.safetensors.index.json", "w"), indent=2)
 
 c = json.load(open(d + "config.json"))
 shutil.copy(d + "config.json", d + "config.json.bak-quant")
