@@ -43,3 +43,10 @@ HERMES_SETUP.md
 .uvacheck.sh
 .rootcause.sh
 .finalize.sh
+
+# scratch scripts from local experiments (abliterated-model bring-up, benchmarking)
+.[a-z]*.sh
+.[a-z]*.py
+*.upstream
+.venv-patch-backup/
+HERMES_SETUP.md

@@ -17,7 +17,21 @@ import os, sys, json, time, glob
 HERE = os.path.dirname(os.path.abspath(__file__)); REPO = os.path.dirname(HERE)
 os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
 os.environ.setdefault("VLLM_USE_FLASHINFER_SAMPLER", "0")
-os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# expandable_segments needs CUDA VMM, which WSL2's paravirt driver rejects -- it fails
+# during the Marlin repack with an opaque "aten::empty ... API call failed". Same reason
+# single-user/start_qwen.sh only sets it off WSL2.
+if "microsoft" in os.uname().release.lower():
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:False")
+else:
+    os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+# DFlash2 runs on the V2 model runner, whose RequestState allocates UVA buffers, and
+# is_uva_available() is just is_pin_memory_available() -- which vLLM disables on WSL2 by
+# default, so the capture dies at startup with "UVA is not available". Pinned memory does
+# work there; it is the blanket WSL2 guard, not the hardware. No effect off WSL2.
+os.environ.setdefault("VLLM_WSL2_ENABLE_PIN_MEMORY", "1")
+# FlashInfer's top-k JIT does not build against an older system nvcc/g++; vLLM falls back
+# to torch.topk anyway, so skip the failing build rather than pay for it every run.
+os.environ.setdefault("VLLM_DFLASH2_TORCH_TOPK", "1")
 import numpy as np
 import torch
 sys.path.insert(0, HERE)
@@ -68,7 +82,10 @@ def main():
         gpu_memory_utilization=float(os.environ.get("GPU_UTIL", 0.95)),
         max_model_len=int(os.environ.get("MAX_LEN", 4096)), max_num_seqs=int(os.environ.get("MAX_SEQS", 8)),
         max_num_batched_tokens=2048, attention_backend="FLASH_ATTN", kv_cache_dtype="bfloat16",
-        mamba_ssm_cache_dtype="float16", language_model_only=True, enable_prefix_caching=False,
+        mamba_ssm_cache_dtype="float16", enable_prefix_caching=False,
+        # LM_ONLY=0 for a target exported text-only (Qwen3_5ForCausalLM), which has no
+        # vision tower to skip; the stock VL checkpoint keeps the default.
+        language_model_only=os.environ.get("LM_ONLY", "1") == "1",
     )
     core = llm.llm_engine.engine_core
     core = getattr(core, "engine_core", core)
