@@ -135,33 +135,36 @@ if [ "$SPEC" = "dflash2" ]; then
   # buffers once for the longest query block it will see -- a captured CUDA graph holds
   # their addresses, so they must not be grown later.
   export VLLM_SPEC_DECODE_ATTN_QMAX=${VLLM_SPEC_DECODE_ATTN_QMAX:-$((DRAFT_TOKENS + 1))}
-  # The lookup produces WRONG OUTPUT on a prefix-cache hit when the verify block is long
-  # and the cache is KVarN. Turn 1 is correct, turn 2 over the same document is not: it
-  # tracks the source for 38-45 characters and then diverges, deterministically, at every
-  # prompt length tested. Fresh server per data point, three requests each, 11 configs:
+  # The ADAPTIVE verify length corrupts a prefix-cache hit under KVarN. When the block
+  # alternates 8<->16 step to step and the request resumed from a cache hit, turn 2 over
+  # the same document tracks the source for ~38 characters and then diverges -- turn 1 is
+  # correct. Deterministic, at five of six prompt residues tested.
   #
-  #   k=7  CTX=huge  lookup on   cold 794/794   self-hit 794/794   clean
-  #   k=15 CTX=fast  lookup on   cold 794/794   self-hit 794/794   clean
-  #   k=7  CTX=fast  lookup on   cold 794/794   self-hit 794/794   clean
-  #   SPEC=mtp CTX=huge          cold 794/794   self-hit 794/794   clean
-  #   k=15 CTX=huge  lookup on   cold 794/794   self-hit 38-45/79x  WRONG (5 residues)
-  #   k=15 CTX=huge  PIECEWISE   cold 794/794   self-hit 38/793     WRONG
-  #   k=15 CTX=huge  LOOKUP=0    cold 794/794   self-hit 794/794   clean
+  # It is the length CHANGING, not the lookup content, and not the KVarN kernels. Fresh
+  # server per row, three requests each (one to arm the cache, two measured), sha-compared:
+  #   baseline, adaptive 8<->16          self-hit 38/793 WRONG   12.71 tok/step
+  #   VLLM_DFLASH2_LOOKUP_ADAPTIVE=0     self-hit 794/794 clean  14.71 tok/step
+  #   PREFIX_CACHE=0, adaptive on        self-hit 794/794 clean  14.33
+  #   KVARN_FUSED_VERIFY=0, adaptive on  self-hit 38/793 WRONG   12.71
+  # and the constant-length setting is clean at every residue that broke (16/64/96/124),
+  # cold and warm, byte-identical.
   #
-  # So it needs the long block AND KVarN AND the lookup AND a cache hit; it is NOT the
-  # cudagraph capture (PIECEWISE breaks identically, so CTX=huge's forced PIECEWISE is no
-  # protection) and it is NOT Bug B, which is fixed. Turning the lookup off is the only
-  # known-correct setting, and it is what the long block was FOR, so this combination has
-  # no fast correct configuration yet. Fall back rather than serve wrong turn-2 answers.
-  # -z "${LOOKUP:-}" so an EXPLICIT LOOKUP=1 still gets through: someone reproducing this
-  # needs to be able to ask for the broken combination on purpose.
-  if [ -z "${LOOKUP:-}" ] && [ "$VLLM_DFLASH2_LOOKUP" = "1" ] && [ "$DRAFT_TOKENS" -gt 7 ] \
+  # Note what the earlier controls actually varied: DFLASH_TOKENS=7, LOOKUP=0 and SPEC=mtp
+  # all make the block a CONSTANT length, so "clean" there was never evidence about the
+  # block being short or the lookup being off. And a wrong draft cannot corrupt greedy
+  # output at all -- rejection_sampler.py emits target_argmax whether it accepts or not --
+  # so the draft content was never a candidate. The damage is on the target's forward.
+  #
+  # Pinning the length is not a sacrifice here: 14.71 tok/step is the FASTEST number in the
+  # series, above the adaptive path's own 14.29 cold. Root cause still open; this is a
+  # correct and fast setting, not a workaround with a cost.
+  if [ -z "${LOOKUP_ADAPTIVE:-}" ] && [ "$VLLM_DFLASH2_LOOKUP" = "1" ] && [ "$DRAFT_TOKENS" -gt 7 ] \
      && [ "$CTX" = "huge" ] && [ "${PREFIX_CACHE:-0}" = "1" ]; then
-    echo "DFLASH_TOKENS>7 with CTX=huge and PREFIX_CACHE=1 corrupts the second turn over a" >&2
-    echo "shared prefix (lookup drafting on the KVarN cache). Forcing the lookup off, which" >&2
-    echo "is correct but slow (4.5 vs 14.3 tok/step): use DFLASH_TOKENS=7 for this mode, or" >&2
-    echo "CTX=fast/long if you want the long verify block. LOOKUP=1 asks for it anyway." >&2
-    export VLLM_DFLASH2_LOOKUP=0
+    echo "DFLASH_TOKENS>7 + CTX=huge + PREFIX_CACHE=1: pinning the verify block to" >&2
+    echo "$((DRAFT_TOKENS + 1)) tokens (VLLM_DFLASH2_LOOKUP_ADAPTIVE=0). The adaptive length" >&2
+    echo "corrupts the second turn over a shared prefix on the KVarN cache; pinned is both" >&2
+    echo "correct and faster. LOOKUP_ADAPTIVE=1 asks for the adaptive path anyway." >&2
+    export VLLM_DFLASH2_LOOKUP_ADAPTIVE=0
   fi
   if [ "$VLLM_DFLASH2_LOOKUP" = "1" ] && [ "$DRAFT_TOKENS" -gt 7 ]; then
     # Adaptive block length means the worker tells the scheduler how many draft tokens to
