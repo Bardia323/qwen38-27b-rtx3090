@@ -50,3 +50,4 @@ HERMES_SETUP.md
 *.upstream
 .venv-patch-backup/
 HERMES_SETUP.md
+windows/qwen-run.log
