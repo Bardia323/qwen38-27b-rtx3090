@@ -77,13 +77,21 @@ $CONFIGS = [ordered]@{
     Launch  = 'SPEC=dflash2 CTX=long PREFIX_CACHE=1 bash single-user/start_qwen.sh'
   }
   uncensored = @{
-    Label   = 'Heretic abliterated  98k ctx  132 tok/s short, 113 edit, 55 reproduce'
+    Label   = 'Heretic abliterated  98k ctx  212 tok/s short, 112 edit, 55 reproduce'
     Context = 98304
     # KV_MEM= (auto) on purpose: this build was converted from bf16 lm_head/embeddings to
     # int8, so its footprint differs from the stock checkpoint and the pinned value above
     # does not transfer.
+    #
+    # DRAFT is the STOCK drafter, not the abliterated one, and that is not a mistake.
+    # Speculative decoding is exact -- the target verifies every token -- so a drafter
+    # trained on the censored model cannot reintroduce refusals, and the abliteration is
+    # measurably intact (identical output, refuses nothing). What it buys is speed: the
+    # stock drafter is GPTQ-calibrated, the heretic-ara one only RTN, and on this target
+    # that is 13.8 -> 55.1 tok/s reproduce, 73 -> 112 edit, 34 -> 64 summary, with
+    # acceptance 53.9% -> 57.0%. Confirmed in both A/B orderings with a long-prompt warmup.
     Launch  = 'MODEL=$HOME/models/Qwen3.8-27B-Heretic-W4A16 ' +
-              'DRAFT=$HOME/models/Qwen3.8-27B-heretic-ara-DFlash2-W4A16 ' +
+              'DRAFT=$HOME/models/Qwen3.8-27B-DFlash2-W4A16 ' +
               'SPEC=dflash2 CTX=long LM_ONLY=0 KV_MEM= DFLASH_MAX_LEN=98304 ' +
               'PREFIX_CACHE=1 VLLM_V2_CUDAGRAPH_MEM_MIB=900 bash single-user/start_qwen.sh'
   }
