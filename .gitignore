@@ -51,3 +51,5 @@ HERMES_SETUP.md
 .venv-patch-backup/
 HERMES_SETUP.md
 windows/qwen-run.log
+windows/.qwen-launch.sh
+windows/qwen-run.log

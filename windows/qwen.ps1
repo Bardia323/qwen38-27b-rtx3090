@@ -136,7 +136,7 @@ function Get-LanInterface {
 }
 function Test-ServerUp([int]$port) {
   try {
-    $code = & curl.exe -s -o NUL -w '%{http_code}' --max-time 5 "http://127.0.0.1:$port/health" 2>$null
+    $code = & curl.exe -s -o NUL -w '%{http_code}' --max-time 5 "http://127.0.0.1:$port/health"
     return "$code" -eq '200'
   } catch { return $false }
 }
@@ -159,8 +159,10 @@ if ($nic) {
   $subnet = 'Any'
 }
 
-$elevatedLog = [bool]$env:QWEN_ELEV_LOG
-if ($elevatedLog) { Start-Transcript -Path $LOG -Append }
+# Always transcript. This used to be gated on QWEN_ELEV_LOG, which nothing ever set, so
+# qwen-run.log was never created and a failed run left no trace anywhere.
+$elevatedLog = $true
+try { Start-Transcript -Path $LOG -Append | Out-Null } catch { $elevatedLog = $false }
 
 Write-Host ''
 Write-Host '=== qwen: Qwen3.8-27B LAN bridge ==='
@@ -177,7 +179,7 @@ Write-Host ''
 
 if ($DryRun) {
   Write-Host '[DryRun] no changes made. It would do:'
-  $dryIP = (& wsl.exe -d $DISTRO -- hostname -I 2>$null | Out-String).Trim().Split(' ')[0]
+  $dryIP = (& wsl.exe -d $DISTRO -- hostname -I | Out-String).Trim().Split(' ')[0]
   Write-Host ('  1. netsh portproxy: 0.0.0.0:{0} -> {1}:{0}  (WSL guest IP, needs admin)' -f $PORT, $(if ($dryIP) { $dryIP } else { '<WSL IP>' }))
   Write-Host ('  2. firewall rule "Qwen vLLM LAN TCP {0}": allow inbound TCP {0} from {1}' -f $PORT, $subnet)
   if ($up) {
@@ -222,7 +224,7 @@ try {
   # NAT mode reassigns the WSL IP on every WSL restart, so it is looked up per run and the
   # rule is rebuilt. (Windows 11 22H2+ could use networkingMode=mirrored and skip all of
   # this; this box is Windows 10 19045, where that is unavailable.)
-  $wslIP = (& wsl.exe -d $DISTRO -- hostname -I 2>$null | Out-String).Trim().Split(' ')[0]
+  $wslIP = (& wsl.exe -d $DISTRO -- hostname -I | Out-String).Trim().Split(' ')[0]
   if (-not $wslIP -or $wslIP -notmatch '^\d+\.\d+\.\d+\.\d+$') {
     throw "Could not determine the WSL IP for distro '$DISTRO' (got '$wslIP'). Is the distro running?"
   }
@@ -284,7 +286,7 @@ try {
     $running = ''
     try {
       $m = & curl.exe -s --max-time 10 -H "Authorization: Bearer $(Get-ApiKey)" `
-             "http://127.0.0.1:$PORT/v1/models" 2>$null | ConvertFrom-Json
+             "http://127.0.0.1:$PORT/v1/models" | ConvertFrom-Json
       $running = [string]$m.data[0].root
       Write-Host ('  running   : {0} (max_model_len {1})' -f (Split-Path $running -Leaf), $m.data[0].max_model_len)
     } catch { Write-Host '  running   : (could not read /v1/models)' }
@@ -312,29 +314,32 @@ try {
     # capture took 3s on a clean card, 542s against a dying engine, and the third attempt
     # wedged outright. Draining first is what makes a restart reliable.
     Write-Host '  checking the GPU is free before starting...'
-    $drain = @'
-if pgrep -f "vllm serve" >/dev/null; then
-  pkill -f "vllm serve"; sleep 5
-  pgrep -f "vllm serve" >/dev/null && { pkill -9 -f "vllm serve"; sleep 5; }
-fi
-for i in $(seq 1 30); do
-  used=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits)
-  [ "$used" -lt 2000 ] && break
-  sleep 2
-done
-nvidia-smi --query-gpu=memory.used --format=csv,noheader
-'@ -replace "`r`n", "`n"
-    $free = (& wsl.exe -d $DISTRO -- bash -c $drain 2>$null | Out-String).Trim()
+    # The drain script lives in windows/gpu-drain.sh -- see the comment there for why it is
+    # not inlined here. Never let the check itself stop the launch: this script runs with
+    # $ErrorActionPreference = 'Stop', so anything it surfaces would otherwise abort
+    # straight to the finally block and the server would silently never start.
+    try {
+      $free = (& wsl.exe -d $DISTRO -- bash "$WSLDIR/windows/gpu-drain.sh" | Out-String).Trim()
+    } catch {
+      $free = "(drain check failed: $($_.Exception.Message))"
+    }
     Write-Host ("  GPU in use before start: {0}" -f $free)
 
     Write-Host "  starting server: opening a WSL console at the repo, running $LAUNCH"
-    Start-Process -FilePath 'wsl.exe' -ArgumentList @('-d', $DISTRO, '--', 'bash', '-l', '-c', "cd $WSLDIR && $LAUNCH")
+    # The launch line goes through a file, not `bash -l -c "<command>"`. Start-Process on
+    # PowerShell 5.1 does not quote -ArgumentList elements that contain spaces, so bash
+    # received `-c cd` and took the rest as positional arguments: the console opened, ran
+    # nothing, and closed, while this script sat waiting on /health for 15 minutes.
+    $launchSh = Join-Path $PSScriptRoot '.qwen-launch.sh'
+    $script = "#!/bin/bash`nset -x`ncd $WSLDIR || exit 1`n$LAUNCH`n"
+    [IO.File]::WriteAllText($launchSh, ($script -replace "`r`n", "`n"), (New-Object Text.UTF8Encoding $false))
+    Start-Process -FilePath 'wsl.exe' -ArgumentList @('-d', $DISTRO, '--', 'bash', '-l', "$WSLDIR/windows/.qwen-launch.sh")
     Write-Host '  waiting for /health (~90s warm; several minutes if the torch.compile cache is cold, e.g. after changing the config or repatching vLLM)...'
     $waited = 0
     while ($waited -lt 900 -and -not (Test-ServerUp $PORT)) {
       Start-Sleep -Seconds 5
       $waited += 5
-      Write-Host ('    ... {0:0}m {1:0}s' -f [int]($waited / 60), ($waited % 60))
+      Write-Host ('    ... {0:0}m {1:0}s' -f [math]::Floor($waited / 60), ($waited % 60))
     }
     if (Test-ServerUp $PORT) {
       Write-Host '  server is up.'
@@ -347,7 +352,7 @@ nvidia-smi --query-gpu=memory.used --format=csv,noheader
       $wk = Get-ApiKey
       $body = '{"model":"qwen3.8-27b","messages":[{"role":"user","content":"hi"}],"max_tokens":24,"temperature":0}'
       & curl.exe -s -o NUL --max-time 180 "http://127.0.0.1:$PORT/v1/chat/completions" `
-        -H "Authorization: Bearer $wk" -H 'Content-Type: application/json' -d $body 2>$null
+        -H "Authorization: Bearer $wk" -H 'Content-Type: application/json' -d $body
       if ($LASTEXITCODE -eq 0) { Write-Host '  warm.' } else { Write-Warning '  warmup request failed; the first real request will be slow.' }
     }
     else { Write-Warning '  timed out after 15 min - check the WSL console for errors.' }
@@ -375,5 +380,5 @@ nvidia-smi --query-gpu=memory.used --format=csv,noheader
 }
 finally {
   if ($elevatedLog) { Stop-Transcript }
-  Read-Host 'Done (or see qwen-run.log for what happened). Press Enter to close.'
+  Read-Host "Done (full log: $LOG). Press Enter to close."
 }
