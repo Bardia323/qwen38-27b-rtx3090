@@ -249,6 +249,10 @@ if [ -z "$VLLM_API_KEY" ] && [ -f "$REPO/api_key.txt" ]; then
   export VLLM_API_KEY="$(cat "$REPO/api_key.txt")"
 fi
 
+# Prefill chunk size (--max-num-batched-tokens below): 2048 measured best on this card.
+# Raising it is a large loss, not a win -- a 24k-token cold prompt took 22.7s at 2048 and
+# 118.9s at 8192, same config otherwise. MAX_BATCHED is a knob only so that stays
+# reproducible without editing this file.
 exec "$VENV/bin/vllm" serve "$MODEL" \
   --served-model-name qwen3.8-27b \
   --host 0.0.0.0 --port $PORT \
@@ -260,7 +264,7 @@ exec "$VENV/bin/vllm" serve "$MODEL" \
   $ATTN_ARGS \
   --mamba-ssm-cache-dtype float16 \
   ${ASYNC_ARGS} \
-  --max-num-batched-tokens 2048 \
+  --max-num-batched-tokens ${MAX_BATCHED:-2048} \
   --speculative-config "$SPEC_CFG" \
   --compilation-config "{\"max_cudagraph_capture_size\":$CG,\"custom_ops\":[\"+rms_norm\",\"+silu_and_mul\"]${CG_MODE}}" \
   --reasoning-parser qwen3 \
